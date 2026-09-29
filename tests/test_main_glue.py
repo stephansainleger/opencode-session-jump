@@ -1,0 +1,245 @@
+"""Unit tests for the interactive glue between fzf and the tmux actions.
+
+fzf itself cannot run headless, so its invocation is observed by patching
+``subprocess.run`` and the action functions are replaced by recorders.  The
+diagnostic log is redirected to a temporary state directory.
+"""
+
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import support
+from ocjump import __main__ as main_mod
+from ocjump import db, render, theme
+from ocjump.panes import Pane
+from ocjump.runner import Result
+
+SESSION = db.Session(
+    session_id="ses_a", title="Hello", directory="/p", time_updated=1_000_000
+)
+PALETTE = theme.load("ansi")
+
+PANE = Pane(
+    pane_id="%1",
+    session_name="work",
+    window_index=0,
+    pane_index=0,
+    current_path="/p",
+    title="OC | Hello",
+    bound_session_id="ses_a",
+    state="working",
+    state_at=None,
+)
+
+
+class PickTest(unittest.TestCase):
+    """The fzf call must hide ids and use ocjump itself for the preview."""
+
+    def test_pick_builds_fzf_argv_and_returns_selection(self) -> None:
+        """The fzf call uses the tab delimiter and previews field 6."""
+        record = render.Record(SESSION, PANE, now_ms=2_000_000)
+        line = render.fzf_line(record, render.layout_for([record]), PALETTE)
+        captured = {}
+
+        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
+            captured["argv"] = argv
+            captured["kwargs"] = kwargs
+            return Result(tuple(argv), 0, line + "\n", "")
+
+        with mock.patch.object(main_mod.subprocess, "run", fake_run):
+            selected = main_mod._pick([record], Path("/tmp/x.db"), PALETTE)
+
+        self.assertEqual(selected, line)
+        self.assertIn("--delimiter=\t", captured["argv"])
+        self.assertTrue(any(arg.startswith("--preview=") for arg in captured["argv"]))
+        self.assertTrue(any("{6}" in arg for arg in captured["argv"]))
+
+    def test_pick_does_not_pipe_fzf_stderr(self) -> None:
+        """The fzf UI renders on stderr; piping it blanks the popup (regression)."""
+        captured = {}
+
+        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
+            captured["kwargs"] = kwargs
+            return Result(tuple(argv), 0, "", "")
+
+        with mock.patch.object(main_mod.subprocess, "run", fake_run):
+            main_mod._pick([render.Record(SESSION, PANE, 2_000_000)], Path("/tmp/x.db"), PALETTE)
+
+        self.assertNotEqual(captured["kwargs"].get("capture_output"), True)
+        self.assertIsNone(captured["kwargs"].get("stderr"))
+
+    def test_pick_returns_none_on_abort(self) -> None:
+        """A non-zero fzf exit is treated as a cancel."""
+
+        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
+            return Result(tuple(argv), 130, "", "")
+
+        with mock.patch.object(main_mod.subprocess, "run", fake_run):
+            self.assertIsNone(main_mod._pick([], Path("/tmp/x.db"), PALETTE))
+
+    def test_pick_enables_ansi_when_colored(self) -> None:
+        """Colored mode passes --ansi and a color scheme, and colors the input."""
+        captured = {}
+
+        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
+            captured["argv"] = argv
+            captured["input"] = kwargs.get("input")
+            return Result(tuple(argv), 0, "", "")
+
+        record = render.Record(SESSION, PANE, now_ms=2_000_000)
+        with mock.patch.object(main_mod.subprocess, "run", fake_run):
+            main_mod._pick([record], Path("/tmp/x.db"), PALETTE, color=True)
+
+        self.assertIn("--ansi", captured["argv"])
+        self.assertTrue(any(arg.startswith("--color=") for arg in captured["argv"]))
+        self.assertIn("\x1b[", captured["input"])
+
+    def test_pick_omits_color_when_disabled(self) -> None:
+        """Plain mode sends neither --ansi nor ANSI codes."""
+        captured = {}
+
+        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
+            captured["argv"] = argv
+            captured["input"] = kwargs.get("input")
+            return Result(tuple(argv), 0, "", "")
+
+        record = render.Record(SESSION, PANE, now_ms=2_000_000)
+        with mock.patch.object(main_mod.subprocess, "run", fake_run):
+            main_mod._pick([record], Path("/tmp/x.db"), PALETTE, color=False)
+
+        self.assertNotIn("--ansi", captured["argv"])
+        self.assertNotIn("\x1b[", captured["input"])
+
+    def test_use_color_honors_no_color(self) -> None:
+        """$NO_COLOR disables color output."""
+        with mock.patch.dict(os.environ, {"NO_COLOR": "1"}):
+            self.assertFalse(main_mod._use_color())
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(main_mod._use_color())
+
+
+class NotifyTest(unittest.TestCase):
+    """Feedback must go to the tmux status line, not to a vanishing stderr."""
+
+    def test_notify_calls_display_message(self) -> None:
+        """_notify invokes ``tmux display-message`` with the prefixed text."""
+        calls = []
+
+        def recorder(argv):  # noqa: ANN001, ANN202 - test seam
+            calls.append(list(argv))
+            return Result(tuple(argv), 0, "", "")
+
+        main_mod._notify("hello", recorder)
+        self.assertEqual(calls[0][:2], ["tmux", "display-message"])
+        self.assertTrue(calls[0][-1].endswith("ocjump: hello"))
+
+
+class HandleSelectionTest(unittest.TestCase):
+    """A selection either jumps to its pane or opens a new window."""
+
+    def setUp(self) -> None:
+        """Create a store whose session directory exists, and redirect the log."""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        state = Path(self.tmp.name) / "state"
+        patcher = mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        resolver = mock.patch.object(
+            main_mod, "resolve_command", return_value="/usr/bin/opencode"
+        )
+        resolver.start()
+        self.addCleanup(resolver.stop)
+        self.workdir = Path(self.tmp.name) / "work"
+        self.workdir.mkdir()
+        path = Path(self.tmp.name) / "opencode.db"
+        conn = support.make_db(path)
+        support.add_session(conn, "ses_a", "Hello", str(self.workdir))
+        support.add_session(conn, "ses_gone", "Gone", "/no/such/dir")
+        conn.close()
+        self.settings = main_mod.Settings(
+            db=path, command="opencode", open_action="session", session_prefix="oc-"
+        )
+        self.session = db.Session(
+            session_id="ses_a", title="Hello", directory=str(self.workdir), time_updated=1
+        )
+
+    def _selected(self, pane: Pane | None) -> str:
+        """Render an fzf selection line for this session and pane."""
+        record = render.Record(self.session, pane, now_ms=2_000_000)
+        return render.fzf_line(record, render.layout_for([record]), PALETTE)
+
+    def test_open_pane_jumps(self) -> None:
+        """A line carrying a pane id focuses that pane."""
+        ok = [Result(("tmux",), 0, "", "")] * 3
+        with mock.patch.object(main_mod, "jump", return_value=ok) as jump:
+            with mock.patch.object(main_mod, "_notify"):
+                code = main_mod._handle_selection(
+                    self._selected(PANE), {"%1": PANE}, self.settings
+                )
+        self.assertEqual(code, 0)
+        jump.assert_called_once_with(PANE)
+
+    def test_jump_failure_is_surfaced(self) -> None:
+        """A failing jump returns non-zero and notifies the user."""
+        bad = [Result(("tmux",), 1, "", "boom")] * 3
+        with mock.patch.object(main_mod, "jump", return_value=bad):
+            with mock.patch.object(main_mod, "_notify") as notify:
+                code = main_mod._handle_selection(
+                    self._selected(PANE), {"%1": PANE}, self.settings
+                )
+        self.assertEqual(code, 1)
+        self.assertIn("jump failed", notify.call_args.args[0])
+
+    def test_closed_session_opens(self) -> None:
+        """A line without a pane id opens the session via the configured action."""
+        ok = Result(("tmux",), 0, "", "")
+        with mock.patch.object(
+            main_mod, "open_session", return_value=("oc-hello", [ok, ok])
+        ) as opener:
+            with mock.patch.object(main_mod, "_notify") as notify:
+                code = main_mod._handle_selection(self._selected(None), {}, self.settings)
+        self.assertEqual(code, 0)
+        self.assertEqual(opener.call_args.args[0].session_id, "ses_a")
+        self.assertIn("opened", notify.call_args.args[0])
+
+    def test_open_failure_is_surfaced(self) -> None:
+        """A failing open run returns non-zero and notifies the user."""
+        bad = Result(("tmux",), 1, "", "no such directory")
+        with mock.patch.object(main_mod, "open_session", return_value=("oc-hello", [bad])):
+            with mock.patch.object(main_mod, "_notify") as notify:
+                code = main_mod._handle_selection(self._selected(None), {}, self.settings)
+        self.assertEqual(code, 1)
+        self.assertIn("open failed", notify.call_args.args[0])
+
+    def test_command_not_found_is_surfaced(self) -> None:
+        """An unresolvable opencode command is reported instead of a dead window."""
+        with mock.patch.object(main_mod, "resolve_command", return_value=None):
+            with mock.patch.object(main_mod, "_notify") as notify:
+                code = main_mod._handle_selection(self._selected(None), {}, self.settings)
+        self.assertEqual(code, 1)
+        self.assertIn("command not found", notify.call_args.args[0])
+
+    def test_missing_directory_is_surfaced(self) -> None:
+        """A session whose directory vanished is reported, not silently dropped."""
+        gone = db.Session(
+            session_id="ses_gone", title="Gone", directory="/no/such/dir", time_updated=1
+        )
+        record = render.Record(gone, None, now_ms=2_000_000)
+        selected = render.fzf_line(record, render.layout_for([record]), PALETTE)
+        with mock.patch.object(main_mod, "open_session") as opener:
+            with mock.patch.object(main_mod, "_notify") as notify:
+                code = main_mod._handle_selection(selected, {}, self.settings)
+        self.assertEqual(code, 1)
+        opener.assert_not_called()
+        self.assertIn("directory no longer exists", notify.call_args.args[0])
+
+    def test_bad_selection_is_surfaced(self) -> None:
+        """A malformed fzf line is logged and reported, not silently dropped."""
+        with mock.patch.object(main_mod, "_notify") as notify:
+            code = main_mod._handle_selection("only\tthree", {}, self.settings)
+        self.assertEqual(code, 1)
+        self.assertIn("unexpected selection", notify.call_args.args[0])

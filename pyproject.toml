@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opencode-session-jump"
+version = "0.1.0"
+description = "Fuzzy picker to list OpenCode sessions and jump to (or open) their tmux pane"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-or-later" }
+dependencies = []
+
+[project.scripts]
+ocjump = "ocjump.__main__:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["D", "E", "F", "I", "W", "UP"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.ruff.lint.isort]
+known-first-party = ["ocjump", "support"]
