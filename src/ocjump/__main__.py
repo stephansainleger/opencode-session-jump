@@ -25,6 +25,7 @@ from .panes import Pane, list_panes, resolve
 from .runner import Runner, run
 
 FZF_TABSTOP = "2"
+SEARCH_TEXT_FIELDS = "4,5"  # directory + title (fields 1..7: glyph,label,age,dir,title,id,pane)
 BORDER_LABEL = " sessions "
 PREVIEW_LABEL = " preview "
 NOTIFY_MS = "5000"
@@ -39,6 +40,8 @@ class Settings:
     open_action: str
     session_prefix: str
     theme: str = config.DEFAULT_THEME
+    sort: str = config.DEFAULT_SORT
+    search: str = config.DEFAULT_SEARCH
     no_state: bool = False
 
 
@@ -63,6 +66,12 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=config.OPEN_ACTIONS,
         default=None,
         help="What to open for a closed session: session (default), window or split",
+    )
+    parser.add_argument(
+        "--sort",
+        choices=config.SORT_MODES,
+        default=None,
+        help="Order: recent (default) or attention (waiting/working first)",
     )
     parser.add_argument("--all", action="store_true", help="Include sub-agent sessions")
     parser.add_argument(
@@ -93,6 +102,7 @@ def _records(
         render.Record(session, mapping.get(session.session_id), now_ms)
         for session in sessions
     ]
+    records = render.sort_records(records, settings.sort)
     panes_by_id = {pane.pane_id: pane for pane in panes}
     return records, panes_by_id
 
@@ -126,6 +136,7 @@ def _pick(
     records: list[render.Record],
     db_path: Path,
     palette: theme.Palette,
+    search: str = config.DEFAULT_SEARCH,
     color: bool = True,
 ) -> str | None:
     """Run fzf over ``records`` and return the selected line, or ``None``."""
@@ -145,6 +156,10 @@ def _pick(
         f"--header={render.fzf_header(layout)}",
         f"--tabstop={FZF_TABSTOP}",
     ]
+    if search == "text":
+        # Restrict matching to directory (4) + title (5) so typing "working"
+        # no longer matches every row via the state label.
+        argv.append(f"--nth={SEARCH_TEXT_FIELDS}")
     if color:
         argv += ["--ansi", f"--color={palette.fzf_color}"]
     # Capture only stdout (the selection). fzf renders its interface on stderr,
@@ -241,6 +256,8 @@ def _load_settings(args: argparse.Namespace) -> Settings:
         open_action=args.open or cfg.open_action,
         session_prefix=cfg.session_prefix,
         theme=cfg.theme,
+        sort=args.sort or cfg.sort,
+        search=cfg.search,
         no_state=args.no_state,
     )
 
@@ -276,7 +293,7 @@ def main(argv: list[str] | None = None) -> int:
         print("ocjump: fzf not found on PATH", file=sys.stderr)
         return 1
     log.log("start", sessions=len(records), panes=len(panes_by_id))
-    selected = _pick(records, settings.db, palette, color=_use_color())
+    selected = _pick(records, settings.db, palette, settings.search, color=_use_color())
     if selected is None:
         log.log("cancelled")
         return 0

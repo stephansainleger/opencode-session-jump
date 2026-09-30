@@ -179,3 +179,48 @@ class RecordFormatsTest(unittest.TestCase):
     def test_empty_table(self) -> None:
         """An empty list prints a short notice instead of nothing."""
         self.assertEqual(render.human_table([], PALETTE), "no sessions\n")
+
+
+def _state_record(state: str, updated: int) -> render.Record:
+    """Build a Record bound to a pane carrying ``state``."""
+    session = db.Session(
+        session_id=f"ses_{updated}", title="t", directory="/p", time_updated=updated
+    )
+    pane = Pane(
+        pane_id="%1",
+        session_name="s",
+        window_index=0,
+        pane_index=0,
+        current_path="/p",
+        title="OC | t",
+        bound_session_id=session.session_id,
+        state=state,
+        state_at=None,
+    )
+    return render.Record(session, pane, now_ms=NOW_MS)
+
+
+class SortRecordsTest(unittest.TestCase):
+    """Attention ordering surfaces waiting/working first, then recency."""
+
+    def test_recent_keeps_the_given_order(self) -> None:
+        """The default mode preserves the newest-first input order."""
+        records = [_state_record("done", 3), _state_record("working", 2)]
+        self.assertEqual(render.sort_records(records, "recent"), records)
+
+    def test_attention_ranks_waiting_then_working(self) -> None:
+        """Waiting outranks working, which outranks done and unknown."""
+        records = [
+            _state_record("done", 5),
+            _state_record("unknown", 6),
+            _state_record("working", 1),
+            _state_record("waiting-permission", 2),
+        ]
+        ordered = [record.state for record in render.sort_records(records, "attention")]
+        self.assertEqual(ordered, ["waiting-permission", "working", "done", "unknown"])
+
+    def test_attention_breaks_ties_by_recency(self) -> None:
+        """Within the same priority, the most recent session comes first."""
+        records = [_state_record("working", 1), _state_record("working", 9)]
+        ordered = [r.session.time_updated for r in render.sort_records(records, "attention")]
+        self.assertEqual(ordered, [9, 1])

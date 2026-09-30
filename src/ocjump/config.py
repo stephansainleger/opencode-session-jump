@@ -9,6 +9,8 @@ The format is INI so it needs no third-party parser and stays easy to edit::
     command = opencode
     session_prefix = oc-
     theme = opencode      ; opencode | ansi
+    sort = recent         ; recent | attention
+    search = text         ; text (title+directory) | all
     # db = /path/to/opencode.db
 """
 
@@ -24,10 +26,14 @@ CONFIG_NAME = "config.ini"
 ENV_CONFIG = "OCJUMP_CONFIG"
 
 OPEN_ACTIONS = ("session", "window", "split")
+SORT_MODES = ("recent", "attention")
+SEARCH_SCOPES = ("text", "all")
 DEFAULT_OPEN_ACTION = "session"
 DEFAULT_COMMAND = "opencode"
 DEFAULT_SESSION_PREFIX = "oc-"
 DEFAULT_THEME = "opencode"
+DEFAULT_SORT = "recent"
+DEFAULT_SEARCH = "text"
 
 
 class ConfigError(RuntimeError):
@@ -42,6 +48,8 @@ class Config:
     command: str = DEFAULT_COMMAND
     session_prefix: str = DEFAULT_SESSION_PREFIX
     theme: str = DEFAULT_THEME
+    sort: str = DEFAULT_SORT
+    search: str = DEFAULT_SEARCH
     db: str | None = None
 
 
@@ -76,17 +84,22 @@ def load(path: Path | None = None) -> Config:
             return text or default
         return default
 
-    open_action = value("open", DEFAULT_OPEN_ACTION)
-    if open_action not in OPEN_ACTIONS:
-        raise ConfigError(
-            f"invalid 'open' = {open_action!r} in {resolved}; "
-            f"expected one of {', '.join(OPEN_ACTIONS)}"
-        )
+    def choice(key: str, default: str, allowed: tuple[str, ...]) -> str:
+        chosen = value(key, default)
+        if chosen not in allowed:
+            raise ConfigError(
+                f"invalid '{key}' = {chosen!r} in {resolved}; "
+                f"expected one of {', '.join(allowed)}"
+            )
+        return chosen
+
     return Config(
-        open_action=open_action,
+        open_action=choice("open", DEFAULT_OPEN_ACTION, OPEN_ACTIONS),
         command=value("command", DEFAULT_COMMAND) or DEFAULT_COMMAND,
         session_prefix=value("session_prefix", DEFAULT_SESSION_PREFIX)
         or DEFAULT_SESSION_PREFIX,
         theme=value("theme", DEFAULT_THEME) or DEFAULT_THEME,
+        sort=choice("sort", DEFAULT_SORT, SORT_MODES),
+        search=choice("search", DEFAULT_SEARCH, SEARCH_SCOPES),
         db=value("db", None),
     )

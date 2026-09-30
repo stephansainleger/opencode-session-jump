@@ -60,12 +60,17 @@ ocjump --preview ID    # render the preview for one session
 ocjump --all           # include sub-agent sessions
 ocjump --no-state      # skip tmux probing (offline / tests)
 ocjump --open split    # action for a closed session: session | window | split
+ocjump --sort attention     # order: recent (default) | attention
 ocjump --command opencode   # executable used to open a session
 ```
 
 Inside the picker: type to fuzzy-filter, `Enter` (or **double-click**)
 accepts, `Esc` cancels. The preview pane shows the session metadata and its
 last messages.
+
+By default the filter matches the **directory and title** only (not the state
+label or age), and `--sort attention` hoists the sessions that need you —
+`waiting` first, then `working` — above everything else.
 
 Columns are `state · age · directory · title`. Label, age and directory are
 padded to fixed widths so every title starts at the same column; the (short)
@@ -146,6 +151,8 @@ open = session        ; session | window | split
 command = opencode
 session_prefix = oc-
 theme = opencode      ; opencode | ansi
+sort = recent         ; recent | attention
+search = text         ; text (directory+title) | all
 # db = /path/to/opencode.db
 ```
 
@@ -155,6 +162,8 @@ theme = opencode      ; opencode | ansi
 | `command`        | `opencode` | executable used to open a session        |
 | `session_prefix` | `oc-`      | prefix for created tmux session names    |
 | `theme`          | `opencode` | color palette (`opencode` or `ansi`)     |
+| `sort`           | `recent`   | order (`recent` or `attention`)          |
+| `search`         | `text`     | filter scope (`text` = dir+title, `all`) |
 | `db`             | *(auto)*   | override the OpenCode store path         |
 
 ## How it works

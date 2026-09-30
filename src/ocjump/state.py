@@ -60,3 +60,20 @@ def style(raw: str) -> StateStyle:
     raising, so a plugin from another version can never break the picker.
     """
     return _STYLES.get(raw, _STYLES[UNKNOWN])
+
+
+# Lower number = needs attention sooner.  Both waiting kinds outrank work in
+# progress; finished/errored sessions sink; historical rows sink further.
+_PRIORITY = {
+    WAITING_PERMISSION: 0,
+    WAITING_QUESTION: 0,
+    WORKING: 1,
+    DONE: 2,
+    ERROR: 3,
+    UNKNOWN: 4,
+}
+
+
+def priority(raw: str) -> int:
+    """Return the attention priority of a raw state (lower = more urgent)."""
+    return _PRIORITY.get(raw, _PRIORITY[UNKNOWN])

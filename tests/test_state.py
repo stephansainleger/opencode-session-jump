@@ -18,3 +18,10 @@ class StateStyleTest(unittest.TestCase):
         neutral = state.style(state.UNKNOWN)
         self.assertEqual(state.style("").label, neutral.label)
         self.assertEqual(state.style("nonsense").glyph, neutral.glyph)
+
+    def test_priority_ranks_attention(self) -> None:
+        """Waiting outranks working, which outranks finished and unknown."""
+        self.assertLess(state.priority(state.WAITING_PERMISSION), state.priority(state.WORKING))
+        self.assertLess(state.priority(state.WORKING), state.priority(state.DONE))
+        self.assertLess(state.priority(state.DONE), state.priority(state.UNKNOWN))
+        self.assertEqual(state.priority("bogus"), state.priority(state.UNKNOWN))

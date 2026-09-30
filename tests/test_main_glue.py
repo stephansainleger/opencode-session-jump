@@ -80,6 +80,32 @@ class PickTest(unittest.TestCase):
         with mock.patch.object(main_mod.subprocess, "run", fake_run):
             self.assertIsNone(main_mod._pick([], Path("/tmp/x.db"), PALETTE))
 
+    def test_pick_restricts_search_to_text_by_default(self) -> None:
+        """Default search matches directory+title only (--nth=4,5)."""
+        captured = {}
+
+        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
+            captured["argv"] = argv
+            return Result(tuple(argv), 0, "", "")
+
+        record = render.Record(SESSION, PANE, now_ms=2_000_000)
+        with mock.patch.object(main_mod.subprocess, "run", fake_run):
+            main_mod._pick([record], Path("/tmp/x.db"), PALETTE)
+        self.assertIn("--nth=4,5", captured["argv"])
+
+    def test_pick_search_all_drops_nth(self) -> None:
+        """``search=all`` searches every displayed field (no --nth)."""
+        captured = {}
+
+        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
+            captured["argv"] = argv
+            return Result(tuple(argv), 0, "", "")
+
+        record = render.Record(SESSION, PANE, now_ms=2_000_000)
+        with mock.patch.object(main_mod.subprocess, "run", fake_run):
+            main_mod._pick([record], Path("/tmp/x.db"), PALETTE, "all")
+        self.assertFalse(any(arg.startswith("--nth=") for arg in captured["argv"]))
+
     def test_pick_enables_ansi_when_colored(self) -> None:
         """Colored mode passes --ansi and a color scheme, and colors the input."""
         captured = {}

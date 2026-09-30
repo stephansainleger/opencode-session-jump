@@ -29,6 +29,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.command, config.DEFAULT_COMMAND)
         self.assertEqual(cfg.session_prefix, config.DEFAULT_SESSION_PREFIX)
         self.assertEqual(cfg.theme, config.DEFAULT_THEME)
+        self.assertEqual(cfg.sort, config.DEFAULT_SORT)
+        self.assertEqual(cfg.search, config.DEFAULT_SEARCH)
         self.assertIsNone(cfg.db)
 
     def test_reads_values(self) -> None:
@@ -39,6 +41,8 @@ class ConfigTest(unittest.TestCase):
             "command = /opt/opencode\n"
             "session_prefix = ocx-\n"
             "theme = ansi\n"
+            "sort = attention\n"
+            "search = all\n"
             "db = /tmp/x.db\n"
         )
         cfg = config.load(self.path)
@@ -46,13 +50,17 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.command, "/opt/opencode")
         self.assertEqual(cfg.session_prefix, "ocx-")
         self.assertEqual(cfg.theme, "ansi")
+        self.assertEqual(cfg.sort, "attention")
+        self.assertEqual(cfg.search, "all")
         self.assertEqual(cfg.db, "/tmp/x.db")
 
-    def test_invalid_open_action_raises(self) -> None:
-        """An unknown open action is rejected with a clear error."""
-        self._write("[ocjump]\nopen = nope\n")
-        with self.assertRaises(config.ConfigError):
-            config.load(self.path)
+    def test_invalid_choices_raise(self) -> None:
+        """Unknown open/sort/search values are rejected with a clear error."""
+        for key in ("open", "sort", "search"):
+            with self.subTest(key=key):
+                self._write(f"[ocjump]\n{key} = nope\n")
+                with self.assertRaises(config.ConfigError):
+                    config.load(self.path)
 
     def test_malformed_file_raises(self) -> None:
         """A file without a section header is rejected."""

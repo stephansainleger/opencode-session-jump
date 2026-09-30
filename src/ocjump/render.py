@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from .db import Session
 from .panes import Pane
-from .state import style
+from .state import priority, style
 from .theme import Palette
 
 FIELD_SEP = "\t"
@@ -98,6 +98,19 @@ class Record:
     def pane_id(self) -> str:
         """Tmux pane id currently displaying the session, or ``""``."""
         return self.pane.pane_id if self.pane else ""
+
+
+def sort_records(records: list[Record], mode: str) -> list[Record]:
+    """Order records for display.
+
+    ``recent`` keeps the given order (already newest-first); ``attention`` puts
+    the sessions that need you on top, then falls back to recency.
+    """
+    if mode != "attention":
+        return list(records)
+    return sorted(
+        records, key=lambda record: (priority(record.state), -record.session.time_updated)
+    )
 
 
 def format_age(now_ms: int, then_ms: int) -> str:
