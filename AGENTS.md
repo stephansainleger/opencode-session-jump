@@ -52,6 +52,12 @@ Never present or commit an intermediate red state (no truncated edits, no
   `PATH` explicitly (`env -u TMUX -u TMUX_PANE PATH=... tmux -L <socket> ...`) or
   you will mask real bugs — a tmux server whose `PATH` lacks `~/.opencode/bin`
   makes `opencode` "command not found" in a new session.
+- Always start throwaway servers with `-f /dev/null`
+  (`tmux -L <socket> -f /dev/null new-session …`) and `kill-server` in teardown.
+  Without the empty config the server reads the user's `~/.tmux.conf` and runs
+  TPM and every plugin; `tmux-copycat`'s `list-keys` then starts servers on
+  sockets being torn down, each re-reading the config and re-running TPM — an
+  infinite fork storm that pins every CPU core.
 - Reproduce in the **same context as the user**: run the picker inside a real
   `display-popup` (`tmux display-popup -E -w 80% -h 75% 'ocjump'`), not only in a
   pane. Verify with the real store (read-only) and the real executable.

@@ -2,7 +2,9 @@
 
 These exercise the parts that touch the real world: ``tmux list-panes`` format
 parsing (including user options), window creation and pane focusing.  They run
-on an isolated socket so the user's tmux server is never affected.
+on an isolated socket so the user's tmux server is never affected, and the
+server starts from an empty config (``-f /dev/null``) so the user's plugins
+(notably TPM and tmux-copycat) are never loaded into it.
 """
 
 from __future__ import annotations
@@ -23,9 +25,19 @@ _TMUX_ENV = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE
 
 
 def tmux(*args: str) -> Result:
-    """Run a tmux command on the isolated test socket."""
+    """Run a tmux command on the isolated test socket.
+
+    ``-f /dev/null`` forces the throwaway server to start with an empty config.
+    Without it the server reads the user's ``~/.tmux.conf`` and runs TPM and all
+    plugins; tmux-copycat's ``list-keys`` then starts servers on sockets that are
+    being torn down, which re-read the config and re-run TPM — an infinite fork
+    storm that pins every core.
+    """
     proc = subprocess.run(
-        ["tmux", "-L", SOCKET, *args], capture_output=True, text=True, env=_TMUX_ENV
+        ["tmux", "-L", SOCKET, "-f", "/dev/null", *args],
+        capture_output=True,
+        text=True,
+        env=_TMUX_ENV,
     )
     return Result(("tmux", *args), proc.returncode, proc.stdout, proc.stderr)
 
@@ -44,19 +56,25 @@ class TmuxIntegrationTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         """Start an isolated tmux server and a scratch directory."""
         cls._tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls._tmp.cleanup)
+        cls.addClassCleanup(cls._teardown_server)
         cls.dir = Path(cls._tmp.name)
         created = tmux("new-session", "-d", "-s", "it", "-x", "120", "-y", "30")
         if created.returncode != 0:
-            cls._tmp.cleanup()
             raise unittest.SkipTest(f"cannot start test tmux server: {created.stderr.strip()}")
 
     @classmethod
-    def tearDownClass(cls) -> None:
-        """Tear down the isolated server, its socket file and scratch directory."""
+    def _teardown_server(cls) -> None:
+        """Kill the isolated server and remove its socket file.
+
+        Registered through ``addClassCleanup`` so it runs even when
+        ``setUpClass`` fails or a test errors; a leaked server would keep a
+        stale socket behind and, combined with the user's plugins, could feed a
+        fork storm. It only ever touches the isolated test socket.
+        """
         tmux("kill-server")
         for stale in Path(tempfile.gettempdir()).glob(f"tmux-*/{SOCKET}"):
             stale.unlink(missing_ok=True)
-        cls._tmp.cleanup()
 
     def _spawn_fake_opencode(self, title: str, state: str = "working") -> tuple[str, Path]:
         """Start a long-lived process named ``opencode`` and tag its pane."""
