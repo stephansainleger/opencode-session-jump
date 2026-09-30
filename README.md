@@ -87,6 +87,22 @@ Destructive actions (`ctrl-d`/`ctrl-k`) ask for confirmation on a second fzf
 screen and refresh the list in place — the popup stays open. Deleting never
 touches the database directly: it runs `opencode session delete`.
 
+### Example
+
+Columns are fixed-width and the state glyph is colored in a real terminal
+(fictional data below):
+
+```text
+●  working    2m   ~/code/api     Add pagination to the /users endpoint
+?  wait:ask   5m   ~/code/blog    Which database should I use?
+⏸  wait:perm  8m   ~/code/infra   Permission to run docker compose up?
+✓  done       1h   ~/code/docs    Fix the broken anchor links
+·  unknown    2d   ~/code/legacy  Migrate the old config loader
+   state      age  directory      title
+```
+
+The preview pane (right) shows the session metadata and its last messages.
+
 Columns are `state · age · directory · title`. Label, age and directory are
 padded to fixed widths so every title starts at the same column; the (short)
 directory precedes the (often long) title so it always stays visible. A
