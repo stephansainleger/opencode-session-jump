@@ -365,3 +365,80 @@ class ConfirmTest(unittest.TestCase):
         with mock.patch.object(main_mod.subprocess, "run", fake_run):
             main_mod._confirm("sure?", ["\x1b[32mline\x1b[0m"])
         self.assertNotIn("\x1b[", captured["input"])
+
+
+class ActionHandlersTest(unittest.TestCase):
+    """The ctrl-* handlers resolve targets, confirm, and delegate correctly."""
+
+    def setUp(self) -> None:
+        """Create a store and settings, and redirect the diagnostic log."""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        state = Path(self.tmp.name) / "state"
+        patcher = mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.workdir = Path(self.tmp.name) / "work"
+        self.workdir.mkdir()
+        path = Path(self.tmp.name) / "opencode.db"
+        conn = support.make_db(path)
+        support.add_session(conn, "ses_a", "Hello", str(self.workdir))
+        conn.close()
+        self.settings = main_mod.Settings(
+            db=path, command="opencode", open_action="session", session_prefix="oc-"
+        )
+        session = db.Session("ses_a", "Hello", str(self.workdir), 1)
+        record = render.Record(session, PANE, now_ms=2_000_000)
+        self.line = render.fzf_line(record, render.layout_for([record]), PALETTE)
+
+    def test_delete_confirmed_delegates_to_opencode(self) -> None:
+        """Confirmation runs ``delete_sessions`` with the resolved command + ids."""
+        ok = [Result(("opencode",), 0, "", "")]
+        with mock.patch.object(main_mod, "_confirm", return_value=True):
+            with mock.patch.object(
+                main_mod, "resolve_command", return_value="/usr/bin/opencode"
+            ):
+                with mock.patch.object(main_mod, "delete_sessions", return_value=ok) as dele:
+                    with mock.patch.object(main_mod, "_notify"):
+                        outcome = main_mod._delete_selected(
+                            main_mod.Selection("ctrl-d", [self.line]), self.settings
+                        )
+        self.assertEqual(outcome, "refresh")
+        self.assertEqual(dele.call_args.args[0], "/usr/bin/opencode")
+        self.assertEqual(dele.call_args.args[1], ["ses_a"])
+
+    def test_delete_cancelled_does_nothing(self) -> None:
+        """A cancelled confirmation never deletes."""
+        with mock.patch.object(main_mod, "_confirm", return_value=False):
+            with mock.patch.object(main_mod, "delete_sessions") as dele:
+                outcome = main_mod._delete_selected(
+                    main_mod.Selection("ctrl-d", [self.line]), self.settings
+                )
+        self.assertEqual(outcome, "refresh")
+        dele.assert_not_called()
+
+    def test_close_confirmed_targets_the_pane_session(self) -> None:
+        """A bound session is closed via its hosting tmux session name."""
+        ok = [Result(("tmux",), 0, "", "")]
+        with mock.patch.object(main_mod, "_confirm", return_value=True):
+            with mock.patch.object(main_mod, "close_sessions", return_value=ok) as closer:
+                with mock.patch.object(main_mod, "_notify"):
+                    outcome = main_mod._close_selected(
+                        main_mod.Selection("ctrl-k", [self.line]), {"%1": PANE}, self.settings
+                    )
+        self.assertEqual(outcome, "refresh")
+        self.assertEqual(closer.call_args.args[0], [PANE.session_name])
+
+    def test_fork_opens_a_fork_and_exits(self) -> None:
+        """``ctrl-f`` opens a forked session and leaves the loop."""
+        ok = Result(("tmux",), 0, "", "")
+        with mock.patch.object(main_mod, "resolve_command", return_value="/usr/bin/opencode"):
+            with mock.patch.object(
+                main_mod, "open_session", return_value=("oc-hello", [ok])
+            ) as opener:
+                with mock.patch.object(main_mod, "_notify"):
+                    outcome = main_mod._open_forked(
+                        main_mod.Selection("ctrl-f", [self.line]), self.settings
+                    )
+        self.assertEqual(outcome, "exit")
+        self.assertTrue(opener.call_args.kwargs.get("fork"))
