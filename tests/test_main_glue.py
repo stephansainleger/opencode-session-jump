@@ -39,7 +39,7 @@ class PickTest(unittest.TestCase):
     """The fzf call must hide ids and use ocjump itself for the preview."""
 
     def test_pick_builds_fzf_argv_and_returns_selection(self) -> None:
-        """The fzf call uses the tab delimiter and previews field 6."""
+        """The fzf call previews field 6 and parses the --expect output."""
         record = render.Record(SESSION, PANE, now_ms=2_000_000)
         line = render.fzf_line(record, render.layout_for([record]), PALETTE)
         captured = {}
@@ -47,15 +47,32 @@ class PickTest(unittest.TestCase):
         def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
             captured["argv"] = argv
             captured["kwargs"] = kwargs
-            return Result(tuple(argv), 0, line + "\n", "")
+            # --expect prints the pressed key first (empty for Enter), then items.
+            return Result(tuple(argv), 0, "\n" + line + "\n", "")
 
         with mock.patch.object(main_mod.subprocess, "run", fake_run):
-            selected = main_mod._pick([record], Path("/tmp/x.db"), PALETTE)
+            selection = main_mod._pick([record], Path("/tmp/x.db"), PALETTE)
 
-        self.assertEqual(selected, line)
+        self.assertEqual(selection.key, "")
+        self.assertEqual(selection.lines, [line])
         self.assertIn("--delimiter=\t", captured["argv"])
+        self.assertIn("--multi", captured["argv"])
+        self.assertIn("--expect=ctrl-d,ctrl-f,ctrl-k", captured["argv"])
         self.assertTrue(any(arg.startswith("--preview=") for arg in captured["argv"]))
         self.assertTrue(any("{6}" in arg for arg in captured["argv"]))
+
+    def test_pick_returns_the_pressed_key(self) -> None:
+        """A non-Enter key is reported so the dispatcher can act on it."""
+        record = render.Record(SESSION, PANE, 2_000_000)
+        line = render.fzf_line(record, render.layout_for([record]), PALETTE)
+
+        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
+            return Result(tuple(argv), 0, "ctrl-d\n" + line + "\n", "")
+
+        with mock.patch.object(main_mod.subprocess, "run", fake_run):
+            selection = main_mod._pick([record], Path("/tmp/x.db"), PALETTE)
+        self.assertEqual(selection.key, "ctrl-d")
+        self.assertEqual(selection.lines, [line])
 
     def test_pick_does_not_pipe_fzf_stderr(self) -> None:
         """The fzf UI renders on stderr; piping it blanks the popup (regression)."""
@@ -269,3 +286,82 @@ class HandleSelectionTest(unittest.TestCase):
             code = main_mod._handle_selection("only\tthree", {}, self.settings)
         self.assertEqual(code, 1)
         self.assertIn("unexpected selection", notify.call_args.args[0])
+
+
+class DispatchTest(unittest.TestCase):
+    """Keyboard actions map to the right handler and loop outcome."""
+
+    LINE = "a\tb\tc\td\te\tses_a\t%1"
+
+    def setUp(self) -> None:
+        """Build settings for the dispatcher."""
+        self.settings = main_mod.Settings(
+            db=Path("/tmp/x.db"), command="opencode", open_action="session",
+            session_prefix="oc-",
+        )
+
+    def test_enter_opens_and_exits(self) -> None:
+        """Enter runs the open handler and leaves the loop."""
+        with mock.patch.object(main_mod, "_handle_selection", return_value=0) as handler:
+            outcome = main_mod._dispatch(
+                main_mod.Selection("", [self.LINE]), {"%1": PANE}, self.settings
+            )
+        self.assertEqual(outcome, "exit")
+        handler.assert_called_once()
+
+    def test_enter_failure_refreshes(self) -> None:
+        """A failed open keeps the popup so the user can retry."""
+        with mock.patch.object(main_mod, "_handle_selection", return_value=1):
+            outcome = main_mod._dispatch(
+                main_mod.Selection("", [self.LINE]), {"%1": PANE}, self.settings
+            )
+        self.assertEqual(outcome, "refresh")
+
+    def test_action_keys_dispatch(self) -> None:
+        """ctrl-f / ctrl-d / ctrl-k route to their handlers."""
+        cases = {
+            "ctrl-f": "_open_forked",
+            "ctrl-d": "_delete_selected",
+            "ctrl-k": "_close_selected",
+        }
+        for key, handler_name in cases.items():
+            with self.subTest(key=key):
+                with mock.patch.object(
+                    main_mod, handler_name, return_value="refresh"
+                ) as handler:
+                    outcome = main_mod._dispatch(
+                        main_mod.Selection(key, [self.LINE]), {"%1": PANE}, self.settings
+                    )
+                self.assertEqual(outcome, "refresh")
+                handler.assert_called_once()
+
+
+class ConfirmTest(unittest.TestCase):
+    """The confirmation screen returns Enter=yes, Esc=no."""
+
+    def _confirm(self, returncode: int):  # noqa: ANN202 - test helper
+        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
+            return Result(tuple(argv), returncode, "", "")
+
+        with mock.patch.object(main_mod.subprocess, "run", fake_run):
+            return main_mod._confirm("sure?", ["line"])
+
+    def test_enter_confirms(self) -> None:
+        """A zero exit code means the user confirmed."""
+        self.assertTrue(self._confirm(0))
+
+    def test_escape_cancels(self) -> None:
+        """A non-zero exit code means the user cancelled."""
+        self.assertFalse(self._confirm(130))
+
+    def test_ansi_is_stripped(self) -> None:
+        """Colored selection lines are shown plain on the confirmation screen."""
+        captured = {}
+
+        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
+            captured["input"] = kwargs.get("input")
+            return Result(tuple(argv), 0, "", "")
+
+        with mock.patch.object(main_mod.subprocess, "run", fake_run):
+            main_mod._confirm("sure?", ["\x1b[32mline\x1b[0m"])
+        self.assertNotIn("\x1b[", captured["input"])

@@ -144,6 +144,16 @@ class TmuxIntegrationTest(unittest.TestCase):
         self.assertIn(name, after)
         self.assertTrue(name.startswith("oc-"))
 
+    def test_close_sessions_kills_a_real_session(self) -> None:
+        """Closing maps to a real ``kill-session`` on the isolated server."""
+        tmux("new-session", "-d", "-s", "oc-victim", "-x", "80", "-y", "24")
+        self.assertIn("oc-victim", tmux("list-sessions", "-F", "#{session_name}").stdout.split())
+        results = actions.close_sessions(["oc-victim"], local_runner)
+        self.assertEqual(results[0].returncode, 0, results[0].stderr)
+        self.assertNotIn(
+            "oc-victim", tmux("list-sessions", "-F", "#{session_name}").stdout.split()
+        )
+
     def test_jump_tolerates_a_detached_server(self) -> None:
         """select-window/select-pane succeed even when switch-client cannot."""
         pane_id, _ = self._spawn_fake_opencode("OC | Jump Target")

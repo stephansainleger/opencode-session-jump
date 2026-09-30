@@ -79,13 +79,15 @@ def resolve_command(command: str, search_dirs: Iterable[str] | None = None) -> s
     return None
 
 
-def build_open_command(command: str, session_id: str) -> str:
-    """Build the shell command that resumes ``session_id``.
+def build_open_command(command: str, session_id: str, fork: bool = False) -> str:
+    """Build the shell command that resumes (or forks) ``session_id``.
 
     ``command`` is the OpenCode executable (possibly with fixed flags); the
     session flag is appended so a resumed session opens exactly where it left.
+    With ``fork`` the session is forked into a new one instead.
     """
-    return f"{command} --session {session_id}"
+    suffix = " --fork" if fork else ""
+    return f"{command} --session {session_id}{suffix}"
 
 
 def session_name(
@@ -137,7 +139,7 @@ def split_window_argv(directory: str, command_string: str) -> list[str]:
 
 
 def open_new_session(
-    session: Session, command: str, prefix: str, runner: Runner = run
+    session: Session, command: str, prefix: str, runner: Runner = run, fork: bool = False
 ) -> tuple[str, list[Result]]:
     """Create a dedicated tmux session for ``session`` and switch the client to it.
 
@@ -148,7 +150,9 @@ def open_new_session(
     name = session_name(session.title, existing_session_names(runner), prefix)
     created = runner(
         new_session_argv(
-            name, session.directory, build_open_command(command, session.session_id)
+            name,
+            session.directory,
+            build_open_command(command, session.session_id, fork),
         )
     )
     if created.returncode != 0:
@@ -158,22 +162,28 @@ def open_new_session(
 
 
 def open_new_window(
-    session: Session, command: str, runner: Runner = run
+    session: Session, command: str, fork: bool = False, runner: Runner = run
 ) -> tuple[str, list[Result]]:
     """Open ``session`` in a new window of the current tmux session."""
     name = window_name(session.title)
     result = runner(
         new_window_argv(
-            name, session.directory, build_open_command(command, session.session_id)
+            name,
+            session.directory,
+            build_open_command(command, session.session_id, fork),
         )
     )
     return name, [result]
 
 
-def open_split(session: Session, command: str, runner: Runner = run) -> tuple[str, list[Result]]:
+def open_split(
+    session: Session, command: str, fork: bool = False, runner: Runner = run
+) -> tuple[str, list[Result]]:
     """Open ``session`` in a pane split of the current tmux window."""
     result = runner(
-        split_window_argv(session.directory, build_open_command(command, session.session_id))
+        split_window_argv(
+            session.directory, build_open_command(command, session.session_id, fork)
+        )
     )
     return "split", [result]
 
@@ -184,12 +194,26 @@ def open_session(
     action: str = "session",
     prefix: str = TMUX_SESSION_PREFIX,
     runner: Runner = run,
+    fork: bool = False,
 ) -> tuple[str, list[Result]]:
     """Dispatch to the configured open action, returning a label and results."""
     if action == "session":
-        return open_new_session(session, command, prefix, runner)
+        return open_new_session(session, command, prefix, runner, fork)
     if action == "window":
-        return open_new_window(session, command, runner)
+        return open_new_window(session, command, fork, runner)
     if action == "split":
-        return open_split(session, command, runner)
+        return open_split(session, command, fork, runner)
     raise ValueError(f"unknown open action: {action!r}")
+
+
+def delete_sessions(command: str, session_ids: Iterable[str], runner: Runner = run) -> list[Result]:
+    """Delete sessions by delegating to ``opencode session delete`` (never our DB).
+
+    ``command`` is the resolved OpenCode executable.
+    """
+    return [runner([command, "session", "delete", session_id]) for session_id in session_ids]
+
+
+def close_sessions(names: Iterable[str], runner: Runner = run) -> list[Result]:
+    """Close tmux sessions by name (``tmux kill-session``)."""
+    return [runner(["tmux", "kill-session", "-t", name]) for name in names]

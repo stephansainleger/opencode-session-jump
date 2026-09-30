@@ -20,12 +20,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import __version__, config, db, log, render, theme
-from .actions import jump, open_session, resolve_command
+from .actions import (
+    close_sessions,
+    delete_sessions,
+    existing_session_names,
+    jump,
+    open_session,
+    resolve_command,
+    session_name,
+)
 from .panes import Pane, list_panes, resolve
 from .runner import Runner, run
 
 FZF_TABSTOP = "2"
 SEARCH_TEXT_FIELDS = "4,5"  # directory + title (fields 1..7: glyph,label,age,dir,title,id,pane)
+EXPECT_KEYS = "ctrl-d,ctrl-f,ctrl-k"
 BORDER_LABEL = " sessions "
 PREVIEW_LABEL = " preview "
 NOTIFY_MS = "5000"
@@ -43,6 +52,14 @@ class Settings:
     sort: str = config.DEFAULT_SORT
     search: str = config.DEFAULT_SEARCH
     no_state: bool = False
+
+
+@dataclass(frozen=True)
+class Selection:
+    """Outcome of the picker: the key pressed (``""`` for Enter) and the lines."""
+
+    key: str
+    lines: list[str]
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -138,8 +155,8 @@ def _pick(
     palette: theme.Palette,
     search: str = config.DEFAULT_SEARCH,
     color: bool = True,
-) -> str | None:
-    """Run fzf over ``records`` and return the selected line, or ``None``."""
+) -> Selection | None:
+    """Run fzf and return the chosen key + lines, or ``None`` on abort."""
     layout = render.layout_for(records)
     input_data = "".join(
         render.fzf_line(record, layout, palette, color=color) + "\n" for record in records
@@ -155,6 +172,8 @@ def _pick(
         f"--border-label={BORDER_LABEL}",
         f"--header={render.fzf_header(layout)}",
         f"--tabstop={FZF_TABSTOP}",
+        "--multi",
+        f"--expect={EXPECT_KEYS}",
     ]
     if search == "text":
         # Restrict matching to directory (4) + title (5) so typing "working"
@@ -168,7 +187,28 @@ def _pick(
     proc = subprocess.run(argv, input=input_data, stdout=subprocess.PIPE, text=True)
     if proc.returncode != 0:
         return None
-    return proc.stdout.strip("\n") or None
+    # With --expect, fzf prints the pressed key first (empty for Enter), then
+    # one line per selected item.
+    lines = proc.stdout.split("\n")
+    key = lines[0] if lines else ""
+    chosen = [line for line in lines[1:] if line]
+    if not chosen:
+        return None
+    return Selection(key, chosen)
+
+
+def _confirm(prompt: str, lines: list[str]) -> bool:
+    """Ask a yes/no confirmation on a second fzf screen (Enter=yes, Esc=no).
+
+    Keeping the confirmation inside the popup means a whole key press is not
+    swallowed by tmux's client-level prompt, and the picker can refresh after.
+    """
+    stripped = [render.strip_ansi(line) for line in lines]
+    argv = ["fzf", f"--header={prompt}", "--no-info"]
+    proc = subprocess.run(
+        argv, input="\n".join(stripped) + "\n", stdout=subprocess.PIPE, text=True
+    )
+    return proc.returncode == 0
 
 
 def _notify(message: str, runner: Runner = run) -> None:
@@ -247,6 +287,115 @@ def _handle_selection(selected: str, panes_by_id: dict[str, Pane], settings: Set
     return 0
 
 
+def _field(line: str, index: int) -> str:
+    """Return the 1-based display field ``index`` of an fzf line (or ``""``)."""
+    fields = line.split(render.FIELD_SEP)
+    return fields[index - 1] if len(fields) >= index else ""
+
+
+def _open_forked(selection: Selection, settings: Settings) -> str:
+    """Open a fork of the first selected session in a new tmux session."""
+    session_id = _field(selection.lines[0], 6)
+    try:
+        with db.connect(settings.db) as conn:
+            session = db.get_session(conn, session_id)
+    except (FileNotFoundError, KeyError, OSError, db.SchemaError) as exc:
+        log.log("fork_error", session_id=session_id, error=repr(exc))
+        _notify(f"fork failed: {exc}")
+        return "refresh"
+    resolved = resolve_command(settings.command)
+    if resolved is None:
+        log.log("command_not_found", command=settings.command)
+        _notify(f"command not found: {settings.command} (set --command)")
+        return "refresh"
+    label, results = open_session(
+        session, resolved, "session", settings.session_prefix, fork=True
+    )
+    created = results[0]
+    if created.returncode != 0:
+        log.log(
+            "fork_failed",
+            session_id=session_id,
+            code=created.returncode,
+            stderr=created.stderr.strip(),
+        )
+        _notify(f"fork failed ({created.returncode}): {created.stderr.strip()}")
+        return "refresh"
+    log.log("fork_ok", session_id=session_id, target=label)
+    _notify(f"forked {session.title} ({label})")
+    return "exit"
+
+
+def _delete_selected(selection: Selection, settings: Settings) -> str:
+    """Delete the selected sessions (delegated to ``opencode session delete``)."""
+    ids = [_field(line, 6) for line in selection.lines]
+    if not _confirm(f"Delete {len(ids)} session(s)?  Enter=yes  Esc=no", selection.lines):
+        return "refresh"
+    resolved = resolve_command(settings.command)
+    if resolved is None:
+        log.log("command_not_found", command=settings.command)
+        _notify(f"command not found: {settings.command} (set --command)")
+        return "refresh"
+    results = delete_sessions(resolved, ids)
+    codes = [result.returncode for result in results]
+    log.log("delete", count=len(ids), codes=codes)
+    if all(code == 0 for code in codes):
+        _notify(f"deleted {len(ids)} session(s)")
+    else:
+        failed = [result for result in results if result.returncode != 0]
+        _notify(f"delete failed ({failed[0].returncode}): {failed[0].stderr.strip()}")
+    return "refresh"
+
+
+def _close_selected(
+    selection: Selection, panes_by_id: dict[str, Pane], settings: Settings
+) -> str:
+    """Close the tmux session(s) hosting the selection, after confirmation."""
+    existing = existing_session_names()
+    names: list[str] = []
+    for line in selection.lines:
+        pane_id = _field(line, 7)
+        if pane_id and pane_id in panes_by_id:
+            name = panes_by_id[pane_id].session_name
+        else:
+            name = session_name(_field(line, 5), (), settings.session_prefix)
+            if name not in existing:
+                continue
+        if name not in names:
+            names.append(name)
+    if not names:
+        _notify("no tmux session to close for the selection")
+        return "refresh"
+    prompt = f"Close {len(names)} tmux session(s)?  Enter=yes  Esc=no"
+    if not _confirm(prompt, selection.lines):
+        return "refresh"
+    results = close_sessions(names)
+    codes = [result.returncode for result in results]
+    log.log("close", names=names, codes=codes)
+    if all(code == 0 for code in codes):
+        _notify(f"closed {len(names)} tmux session(s)")
+    else:
+        failed = [result for result in results if result.returncode != 0]
+        _notify(f"close failed ({failed[0].returncode}): {failed[0].stderr.strip()}")
+    return "refresh"
+
+
+def _dispatch(
+    selection: Selection, panes_by_id: dict[str, Pane], settings: Settings
+) -> str:
+    """Perform the action bound to the pressed key; return ``refresh`` or ``exit``."""
+    if selection.key == "":
+        code = _handle_selection(selection.lines[0], panes_by_id, settings)
+        return "exit" if code == 0 else "refresh"
+    if selection.key == "ctrl-f":
+        return _open_forked(selection, settings)
+    if selection.key == "ctrl-d":
+        return _delete_selected(selection, settings)
+    if selection.key == "ctrl-k":
+        return _close_selected(selection, panes_by_id, settings)
+    return "refresh"
+
+
 def _load_settings(args: argparse.Namespace) -> Settings:
     """Merge CLI flags over the config file into effective settings."""
     cfg = config.load()
@@ -292,13 +441,23 @@ def main(argv: list[str] | None = None) -> int:
     if not shutil.which("fzf"):
         print("ocjump: fzf not found on PATH", file=sys.stderr)
         return 1
-    log.log("start", sessions=len(records), panes=len(panes_by_id))
-    selected = _pick(records, settings.db, palette, settings.search, color=_use_color())
-    if selected is None:
-        log.log("cancelled")
-        return 0
-    log.log("picked", line=selected)
-    return _handle_selection(selected, panes_by_id, settings)
+    while True:
+        log.log("start", sessions=len(records), panes=len(panes_by_id))
+        selection = _pick(
+            records, settings.db, palette, settings.search, color=_use_color()
+        )
+        if selection is None:
+            log.log("cancelled")
+            return 0
+        log.log("picked", key=selection.key, count=len(selection.lines))
+        if _dispatch(selection, panes_by_id, settings) == "exit":
+            return 0
+        try:
+            records, panes_by_id = _records(settings, args.all)
+        except (FileNotFoundError, sqlite3.Error, db.SchemaError) as exc:
+            log.log("refresh_error", error=repr(exc))
+            _notify(f"cannot read store: {exc}")
+            return 1
 
 
 if __name__ == "__main__":

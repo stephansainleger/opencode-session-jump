@@ -72,6 +72,21 @@ By default the filter matches the **directory and title** only (not the state
 label or age), and `--sort attention` hoists the sessions that need you —
 `waiting` first, then `working` — above everything else.
 
+**Actions** (keyboard, inside the picker):
+
+| Key      | Action                                                                 |
+| -------- | ---------------------------------------------------------------------- |
+| `Enter`  | jump to the pane displaying the session, or open it                    |
+| `ctrl-f` | **fork** the session into a new one (new tmux session)                 |
+| `ctrl-d` | **delete** the selected session(s) — confirmed, delegated to `opencode session delete` |
+| `ctrl-k` | **close** the selected session's tmux session(s) — confirmed           |
+| `Tab`    | mark several rows for `ctrl-d` / `ctrl-k`                              |
+| `Esc`    | quit                                                                   |
+
+Destructive actions (`ctrl-d`/`ctrl-k`) ask for confirmation on a second fzf
+screen and refresh the list in place — the popup stays open. Deleting never
+touches the database directly: it runs `opencode session delete`.
+
 Columns are `state · age · directory · title`. Label, age and directory are
 padded to fixed widths so every title starts at the same column; the (short)
 directory precedes the (often long) title so it always stays visible. A

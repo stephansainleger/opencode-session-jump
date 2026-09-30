@@ -68,6 +68,34 @@ class OpenSessionTest(unittest.TestCase):
             actions.build_open_command("opencode", "ses_a"), "opencode --session ses_a"
         )
 
+    def test_build_open_command_forks(self) -> None:
+        """With ``fork`` the session is forked instead of resumed in place."""
+        self.assertEqual(
+            actions.build_open_command("opencode", "ses_a", fork=True),
+            "opencode --session ses_a --fork",
+        )
+
+    def test_delete_sessions_argv(self) -> None:
+        """Deletion delegates to ``opencode session delete`` for each id."""
+        runner = RecordingRunner()
+        actions.delete_sessions("/usr/bin/opencode", ["ses_a", "ses_b"], runner)
+        self.assertEqual(
+            runner.calls,
+            [
+                ["/usr/bin/opencode", "session", "delete", "ses_a"],
+                ["/usr/bin/opencode", "session", "delete", "ses_b"],
+            ],
+        )
+
+    def test_close_sessions_argv(self) -> None:
+        """Closing maps to one ``tmux kill-session`` per name."""
+        runner = RecordingRunner()
+        actions.close_sessions(["oc-a", "oc-b"], runner)
+        self.assertEqual(
+            runner.calls,
+            [["tmux", "kill-session", "-t", "oc-a"], ["tmux", "kill-session", "-t", "oc-b"]],
+        )
+
     def test_session_name_variants(self) -> None:
         """Titles map to safe, capped, collision-free ``oc-`` names."""
         cases = [

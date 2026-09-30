@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 
 from .db import Session
@@ -20,6 +21,12 @@ from .theme import Palette
 FIELD_SEP = "\t"
 FZF_VISIBLE_FIELDS = "1,2,3,4,5"
 ANSI_RESET = "\x1b[0m"
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove SGR color codes (needed when re-feeding a line outside fzf)."""
+    return _ANSI_RE.sub("", text)
 DIRECTORY_MAX = 30
 
 # Header words set a floor on the column widths so the legend always fits and
