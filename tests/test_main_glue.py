@@ -60,6 +60,9 @@ class PickTest(unittest.TestCase):
         self.assertIn("--expect=ctrl-d,ctrl-f,ctrl-k", captured["argv"])
         self.assertTrue(any(arg.startswith("--preview=") for arg in captured["argv"]))
         self.assertTrue(any("{6}" in arg for arg in captured["argv"]))
+        header = next(arg for arg in captured["argv"] if arg.startswith("--header="))
+        self.assertIn("directory", header)
+        self.assertIn("ctrl-d", header)  # shortcuts legend on the second line
 
     def test_pick_returns_the_pressed_key(self) -> None:
         """A non-Enter key is reported so the dispatcher can act on it."""
@@ -139,6 +142,8 @@ class PickTest(unittest.TestCase):
         self.assertIn("--ansi", captured["argv"])
         self.assertTrue(any(arg.startswith("--color=") for arg in captured["argv"]))
         self.assertIn("\x1b[", captured["input"])
+        header = next(arg for arg in captured["argv"] if arg.startswith("--header="))
+        self.assertIn("\x1b[", header)  # shortcut legend is colored
 
     def test_pick_omits_color_when_disabled(self) -> None:
         """Plain mode sends neither --ansi nor ANSI codes."""
@@ -155,6 +160,8 @@ class PickTest(unittest.TestCase):
 
         self.assertNotIn("--ansi", captured["argv"])
         self.assertNotIn("\x1b[", captured["input"])
+        header = next(arg for arg in captured["argv"] if arg.startswith("--header="))
+        self.assertNotIn("\x1b[", header)
 
     def test_use_color_honors_no_color(self) -> None:
         """$NO_COLOR disables color output."""

@@ -36,6 +36,8 @@ FZF_TABSTOP = "2"
 SEARCH_TEXT_FIELDS = "4,5"  # directory + title (fields 1..7: glyph,label,age,dir,title,id,pane)
 EXPECT_KEYS = "ctrl-d,ctrl-f,ctrl-k"
 BORDER_LABEL = " sessions "
+# Second header line, shown at the bottom of the popup under the column legend.
+KEY_HELP = "Enter open · ctrl-f fork · ctrl-d delete · ctrl-k close · Tab multi · Esc quit"
 PREVIEW_LABEL = " preview "
 NOTIFY_MS = "5000"
 
@@ -161,6 +163,8 @@ def _pick(
     input_data = "".join(
         render.fzf_line(record, layout, palette, color=color) + "\n" for record in records
     )
+    key_help = render.colorize(KEY_HELP, palette, "keys") if color else KEY_HELP
+    header = f"{render.fzf_header(layout)}\n{key_help}"
     argv = [
         "fzf",
         f"--delimiter={render.FIELD_SEP}",
@@ -170,7 +174,7 @@ def _pick(
         f"--preview-label={PREVIEW_LABEL}",
         "--border=rounded",
         f"--border-label={BORDER_LABEL}",
-        f"--header={render.fzf_header(layout)}",
+        f"--header={header}",
         f"--tabstop={FZF_TABSTOP}",
         "--multi",
         f"--expect={EXPECT_KEYS}",

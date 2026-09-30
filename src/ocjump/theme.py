@@ -30,7 +30,11 @@ def _to_sgr(value: str) -> str:
 
 @dataclass(frozen=True)
 class Palette:
-    """A named set of state colors plus a ready-to-use fzf ``--color`` spec."""
+    """A named set of semantic colors plus a ready-to-use fzf ``--color`` spec.
+
+    ``state_colors`` maps a role (state labels, plus ``keys`` for the shortcut
+    legend) to a color value.
+    """
 
     name: str
     state_colors: Mapping[str, str]
@@ -51,6 +55,7 @@ OPENCODE = Palette(
         "secondary": "#5c9cf5",
         "error": "#e06c75",
         "muted": "#808080",
+        "keys": "#fab283",  # OpenCode primary: stands out from the grey header
     },
     fzf_color=(
         "fg:#eeeeee,bg:#0a0a0a,fg+:#eeeeee,bg+:#1e1e1e,"
@@ -72,6 +77,7 @@ ANSI = Palette(
         "secondary": "34",
         "error": "1;31",
         "muted": "90",
+        "keys": "1;36",
     },
     fzf_color=(
         "hl:33,hl+:214,header:8,info:240,separator:59,"

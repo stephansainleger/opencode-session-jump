@@ -35,3 +35,10 @@ class ThemeTest(unittest.TestCase):
         """The opencode palette defines 24-bit state colors."""
         palette = theme.load("opencode")
         self.assertTrue(palette.sgr("success").startswith("38;2;"))
+
+    def test_keys_role_is_distinct_from_muted(self) -> None:
+        """The shortcut legend color differs from the faded header color."""
+        for name in theme.names():
+            palette = theme.load(name)
+            with self.subTest(theme=name):
+                self.assertNotEqual(palette.sgr("keys"), palette.sgr("muted"))

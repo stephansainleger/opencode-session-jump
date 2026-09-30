@@ -87,6 +87,9 @@ Destructive actions (`ctrl-d`/`ctrl-k`) ask for confirmation on a second fzf
 screen and refresh the list in place — the popup stays open. Deleting never
 touches the database directly: it runs `opencode session delete`.
 
+The same shortcuts are printed at the bottom of the picker, under the column
+legend.
+
 ### Example
 
 Columns are fixed-width and the state glyph is colored in a real terminal

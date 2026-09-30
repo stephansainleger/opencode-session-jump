@@ -165,6 +165,13 @@ class RecordFormatsTest(unittest.TestCase):
         self.assertEqual(payload["pane_id"], "%1")
         self.assertAlmostEqual(payload["updated"], (NOW_MS - 5000) / 1000.0)
 
+    def test_colorize_wraps_text_with_a_role_color(self) -> None:
+        """The colorize helper applies the palette color and resets after."""
+        out = render.colorize("hi", PALETTE, "success")
+        self.assertTrue(out.startswith("\x1b["))
+        self.assertIn("hi", out)
+        self.assertTrue(out.endswith(render.ANSI_RESET))
+
     def test_nul_record_is_terminated(self) -> None:
         """NUL output ends each record with a NUL byte."""
         self.assertTrue(render.nul_record(_record()).endswith("\0"))

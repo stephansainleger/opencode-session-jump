@@ -27,6 +27,11 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 def strip_ansi(text: str) -> str:
     """Remove SGR color codes (needed when re-feeding a line outside fzf)."""
     return _ANSI_RE.sub("", text)
+
+
+def colorize(text: str, palette: Palette, role: str) -> str:
+    """Wrap ``text`` in the palette color for ``role`` (for header/chrome)."""
+    return f"\x1b[{palette.sgr(role)}m{text}{ANSI_RESET}"
 DIRECTORY_MAX = 30
 
 # Header words set a floor on the column widths so the legend always fits and
