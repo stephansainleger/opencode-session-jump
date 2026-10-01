@@ -21,6 +21,10 @@ class CliTest(unittest.TestCase):
         """Create a store with two sessions and one message."""
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name) / "state"
+        patcher = mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.state)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.db_path = Path(self.tmp.name) / "opencode.db"
         conn = support.make_db(self.db_path)
         support.add_session(conn, "ses_a", "Alpha", "/p", time_updated=20)
@@ -47,6 +51,13 @@ class CliTest(unittest.TestCase):
         code, out = self._run(["--list"])
         self.assertEqual(code, 0)
         self.assertIn("Alpha", out)
+
+    def test_records_timings_are_logged(self) -> None:
+        """A listing records its read timings for later diagnosis."""
+        self._run(["--list"])
+        log = (self.state / "ocjump" / "ocjump.log").read_text(encoding="utf-8")
+        self.assertIn('"event": "records"', log)
+        self.assertIn("records_ms", log)
 
     def test_null_listing_is_terminated(self) -> None:
         """-0 terminates every record with a NUL byte."""

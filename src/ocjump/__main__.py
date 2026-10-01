@@ -111,10 +111,22 @@ def _build_parser() -> argparse.ArgumentParser:
 def _records(
     settings: Settings, include_children: bool
 ) -> tuple[list[render.Record], dict[str, Pane]]:
-    """Load sessions, probe panes and pair them into display records."""
+    """Load sessions, probe panes and pair them into display records.
+
+    Timings are logged (``records_ms`` / ``connect_ms`` / ``list_ms`` /
+    ``panes_ms``) so a slow refresh after an action can be attributed to the
+    store read rather than guessed at.
+    """
+    start = time.perf_counter()
+    connect_start = time.perf_counter()
     with db.connect(settings.db) as conn:
+        connect_ms = (time.perf_counter() - connect_start) * 1000
+        list_start = time.perf_counter()
         sessions = db.list_sessions(conn, include_children=include_children)
+        list_ms = (time.perf_counter() - list_start) * 1000
+    panes_start = time.perf_counter()
     panes = [] if settings.no_state else list_panes()
+    panes_ms = (time.perf_counter() - panes_start) * 1000
     mapping = resolve(sessions, panes)
     now_ms = int(time.time() * 1000)
     records = [
@@ -123,6 +135,14 @@ def _records(
     ]
     records = render.sort_records(records, settings.sort)
     panes_by_id = {pane.pane_id: pane for pane in panes}
+    log.log(
+        "records",
+        sessions=len(sessions),
+        connect_ms=round(connect_ms, 1),
+        list_ms=round(list_ms, 1),
+        panes_ms=round(panes_ms, 1),
+        records_ms=round((time.perf_counter() - start) * 1000, 1),
+    )
     return records, panes_by_id
 
 
@@ -341,9 +361,11 @@ def _delete_selected(selection: Selection, settings: Settings) -> str:
         _notify(f"command not found: {settings.command} (set --command)")
         return "refresh"
     _notify(f"deleting {len(ids)} session(s)…")
+    delete_start = time.perf_counter()
     results = delete_sessions(resolved, ids)
+    delete_ms = (time.perf_counter() - delete_start) * 1000
     codes = [result.returncode for result in results]
-    log.log("delete", count=len(ids), codes=codes)
+    log.log("delete", count=len(ids), codes=codes, delete_ms=round(delete_ms, 1))
     if all(code == 0 for code in codes):
         _notify(f"deleted {len(ids)} session(s)")
     else:
@@ -428,9 +450,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.preview:
+        preview_start = time.perf_counter()
         with db.connect(settings.db) as conn:
             session = db.get_session(conn, args.preview)
             print(db.describe(conn, session))
+        log.log(
+            "preview",
+            session=args.preview,
+            preview_ms=round((time.perf_counter() - preview_start) * 1000, 1),
+        )
         return 0
 
     try:
