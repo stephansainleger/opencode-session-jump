@@ -340,6 +340,7 @@ def _delete_selected(selection: Selection, settings: Settings) -> str:
         log.log("command_not_found", command=settings.command)
         _notify(f"command not found: {settings.command} (set --command)")
         return "refresh"
+    _notify(f"deleting {len(ids)} session(s)…")
     results = delete_sessions(resolved, ids)
     codes = [result.returncode for result in results]
     log.log("delete", count=len(ids), codes=codes)

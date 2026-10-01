@@ -76,15 +76,26 @@ class OpenSessionTest(unittest.TestCase):
         )
 
     def test_delete_sessions_argv(self) -> None:
-        """Deletion delegates to ``opencode session delete`` for each id."""
+        """Deletion delegates one ``opencode session delete`` per id, in order."""
         runner = RecordingRunner()
-        actions.delete_sessions("/usr/bin/opencode", ["ses_a", "ses_b"], runner)
+        actions.delete_sessions("/usr/bin/opencode", ["ses_a", "ses_b"], runner, max_workers=1)
         self.assertEqual(
             runner.calls,
             [
                 ["/usr/bin/opencode", "session", "delete", "ses_a"],
                 ["/usr/bin/opencode", "session", "delete", "ses_b"],
             ],
+        )
+
+    def test_delete_sessions_parallel_keeps_order_and_count(self) -> None:
+        """The thread pool returns one Result per id, in the input order."""
+        runner = RecordingRunner()
+        results = actions.delete_sessions(
+            "/usr/bin/opencode", ["ses_a", "ses_b", "ses_c"], runner, max_workers=3
+        )
+        self.assertEqual(len(results), 3)
+        self.assertEqual(
+            sorted(call[3] for call in runner.calls), ["ses_a", "ses_b", "ses_c"]
         )
 
     def test_close_sessions_argv(self) -> None:

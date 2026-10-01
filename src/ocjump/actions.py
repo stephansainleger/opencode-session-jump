@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .db import Session
@@ -206,12 +207,34 @@ def open_session(
     raise ValueError(f"unknown open action: {action!r}")
 
 
-def delete_sessions(command: str, session_ids: Iterable[str], runner: Runner = run) -> list[Result]:
+# ``opencode session delete`` starts the whole runtime (~1s each), so a pool is
+# what keeps a multi-selection bearable: wall time is a few start-ups, not one
+# per session.  Kept modest to limit SQLite write contention with the running TUI.
+DELETE_WORKERS = 6
+
+
+def delete_sessions(
+    command: str,
+    session_ids: Iterable[str],
+    runner: Runner = run,
+    max_workers: int = DELETE_WORKERS,
+) -> list[Result]:
     """Delete sessions by delegating to ``opencode session delete`` (never our DB).
 
-    ``command`` is the resolved OpenCode executable.
+    ``command`` is the resolved OpenCode executable.  Each invocation starts
+    the whole OpenCode runtime (~1s), so several ids run in a small thread pool:
+    wall time is then roughly one startup instead of one per id.  Results keep
+    the input order.
     """
-    return [runner([command, "session", "delete", session_id]) for session_id in session_ids]
+    ids = list(session_ids)
+    if len(ids) <= 1 or max_workers <= 1:
+        return [runner([command, "session", "delete", session_id]) for session_id in ids]
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        pending = [
+            pool.submit(runner, [command, "session", "delete", session_id])
+            for session_id in ids
+        ]
+        return [future.result() for future in pending]
 
 
 def close_sessions(names: Iterable[str], runner: Runner = run) -> list[Result]:

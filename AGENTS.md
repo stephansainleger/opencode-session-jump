@@ -70,6 +70,11 @@ Never present or commit an intermediate red state (no truncated edits, no
 `tmux display-message` and append an NDJSON record to
 `~/.local/state/ocjump/ocjump.log` (see `src/ocjump/log.py`).
 
+**External process cost.** An `opencode` subcommand starts the whole runtime
+(~1s), so never loop one process per session: batch through a small thread pool
+(`actions.delete_sessions`) and remember `tmux` calls are ~4ms. Measure before
+optimizing (`time opencode session delete <bogus>`).
+
 ## Conventions
 
 - Python 3.10+, **standard library only** at runtime (sqlite3, subprocess,

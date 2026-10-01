@@ -88,7 +88,9 @@ screen and refresh the list in place — the popup stays open. Deleting never
 touches the database directly: it runs `opencode session delete`.
 
 The same shortcuts are printed at the bottom of the picker, under the column
-legend.
+legend. Deleting several sessions runs the `opencode` processes in a small
+thread pool (each `opencode` call has a ~1s startup), so the cost is a few
+runtimes rather than one per session.
 
 ### Example
 
