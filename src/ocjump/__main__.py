@@ -32,6 +32,9 @@ from .actions import (
 from .panes import Pane, list_panes, resolve
 from .runner import Runner, run
 
+# Interpreter start, so the log can measure shim/python startup per process.
+_IMPORT_TIME = time.perf_counter()
+
 FZF_TABSTOP = "2"
 SEARCH_TEXT_FIELDS = "4,5"  # directory + title (fields 1..7: glyph,label,age,dir,title,id,pane)
 EXPECT_KEYS = "ctrl-d,ctrl-f,ctrl-k"
@@ -208,7 +211,14 @@ def _pick(
     # Capture only stdout (the selection). fzf renders its interface on stderr,
     # so stderr MUST be inherited from the caller (the tmux popup); piping it
     # would swallow the UI and leave the popup blank.
+    log.log("pick_spawn", items=len(records))
+    pick_start = time.perf_counter()
     proc = subprocess.run(argv, input=input_data, stdout=subprocess.PIPE, text=True)
+    log.log(
+        "pick_exit",
+        rc=proc.returncode,
+        pick_ms=round((time.perf_counter() - pick_start) * 1000, 1),
+    )
     if proc.returncode != 0:
         return None
     # With --expect, fzf prints the pressed key first (empty for Enter), then
@@ -229,8 +239,15 @@ def _confirm(prompt: str, lines: list[str]) -> bool:
     """
     stripped = [render.strip_ansi(line) for line in lines]
     argv = ["fzf", f"--header={prompt}", "--no-info"]
+    log.log("confirm_spawn", items=len(stripped))
+    confirm_start = time.perf_counter()
     proc = subprocess.run(
         argv, input="\n".join(stripped) + "\n", stdout=subprocess.PIPE, text=True
+    )
+    log.log(
+        "confirm_exit",
+        rc=proc.returncode,
+        confirm_ms=round((time.perf_counter() - confirm_start) * 1000, 1),
     )
     return proc.returncode == 0
 
@@ -450,6 +467,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.preview:
+        log.log(
+            "preview_start",
+            session=args.preview,
+            startup_ms=round((time.perf_counter() - _IMPORT_TIME) * 1000, 1),
+        )
         preview_start = time.perf_counter()
         with db.connect(settings.db) as conn:
             session = db.get_session(conn, args.preview)

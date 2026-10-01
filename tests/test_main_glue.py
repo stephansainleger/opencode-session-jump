@@ -17,6 +17,23 @@ from ocjump import db, render, theme
 from ocjump.panes import Pane
 from ocjump.runner import Result
 
+_MODULE_TMP = None
+
+
+def setUpModule() -> None:
+    """Redirect all diagnostic logging to a throwaway state dir for the module."""
+    global _MODULE_TMP
+    _MODULE_TMP = tempfile.TemporaryDirectory()
+    os.environ["XDG_STATE_HOME"] = _MODULE_TMP.name
+
+
+def tearDownModule() -> None:
+    """Undo the module-level state dir redirection."""
+    os.environ.pop("XDG_STATE_HOME", None)
+    if _MODULE_TMP is not None:
+        _MODULE_TMP.cleanup()
+
+
 SESSION = db.Session(
     session_id="ses_a", title="Hello", directory="/p", time_updated=1_000_000
 )
