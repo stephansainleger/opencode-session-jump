@@ -86,3 +86,42 @@ class CliTest(unittest.TestCase):
             with redirect_stderr(io.StringIO()):
                 code = main(["--no-state", "--db", str(self.db_path), "--list"])
         self.assertEqual(code, 1)
+
+
+class CallbackTest(unittest.TestCase):
+    """Hidden subcommands the fzf binds call back into."""
+
+    def setUp(self) -> None:
+        """Create a store with two sessions; redirect the log."""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name) / "state"
+        patcher = mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.state)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.db_path = Path(self.tmp.name) / "opencode.db"
+        conn = support.make_db(self.db_path)
+        support.add_session(conn, "ses_a", "Alpha", "/p", time_updated=20)
+        support.add_session(conn, "ses_b", "Beta", "/p", time_updated=10)
+        conn.close()
+
+    def _run(self, argv: list[str]) -> tuple[int, str]:
+        """Run ``main`` capturing stdout."""
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = main(["--no-state", "--db", str(self.db_path)] + argv)
+        return code, buffer.getvalue()
+
+    def test_list_lines_emits_fzf_rows(self) -> None:
+        """--list-lines prints one seven-field line per session."""
+        code, out = self._run(["--list-lines"])
+        self.assertEqual(code, 0)
+        rows = [line for line in out.splitlines() if line]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows[0].split("\t")), 7)
+
+    def test_action_does_not_write_stdout(self) -> None:
+        """A callback action must stay silent (stdout would corrupt fzf)."""
+        code, out = self._run(["--action", "delete", "--session", "ses_a"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")

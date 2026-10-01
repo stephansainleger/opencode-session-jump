@@ -74,7 +74,7 @@ class PickTest(unittest.TestCase):
         self.assertEqual(selection.lines, [line])
         self.assertIn("--delimiter=\t", captured["argv"])
         self.assertIn("--multi", captured["argv"])
-        self.assertIn("--expect=ctrl-d,ctrl-f,ctrl-k", captured["argv"])
+        self.assertIn("--expect=ctrl-f,ctrl-d,ctrl-k", captured["argv"])
         self.assertTrue(any(arg.startswith("--preview=") for arg in captured["argv"]))
         self.assertTrue(any("{6}" in arg for arg in captured["argv"]))
         header = next(arg for arg in captured["argv"] if arg.startswith("--header="))

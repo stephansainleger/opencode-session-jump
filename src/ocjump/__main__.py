@@ -37,7 +37,8 @@ _IMPORT_TIME = time.perf_counter()
 
 FZF_TABSTOP = "2"
 SEARCH_TEXT_FIELDS = "4,5"  # directory + title (fields 1..7: glyph,label,age,dir,title,id,pane)
-EXPECT_KEYS = "ctrl-d,ctrl-f,ctrl-k"
+ACTION_KEYS = ("ctrl-f", "ctrl-d", "ctrl-k")
+ACTIONS = ("fork", "delete", "close")
 BORDER_LABEL = " sessions "
 # Second header line, shown at the bottom of the popup under the column legend.
 KEY_HELP = "Enter open · ctrl-f fork · ctrl-d delete · ctrl-k close · Tab multi · Esc quit"
@@ -107,6 +108,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--null", "-0", action="store_true", dest="nul", help="NUL-separated output for --list"
     )
+    # Hidden callbacks the fzf binds invoke; not part of the user-facing surface.
+    parser.add_argument("--list-lines", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--action", choices=ACTIONS, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--session", action="append", default=[], metavar="SESSION_ID", help=argparse.SUPPRESS
+    )
     parser.add_argument("--version", action="version", version=f"ocjump {__version__}")
     return parser
 
@@ -168,6 +175,16 @@ def _print_list(
         sys.stdout.write(render.human_table(records, palette, color=color))
 
 
+def _render_lines(
+    records: list[render.Record], palette: theme.Palette, color: bool
+) -> str:
+    """Render ``records`` as the newline-terminated fzf input stream."""
+    layout = render.layout_for(records)
+    return "".join(
+        render.fzf_line(record, layout, palette, color=color) + "\n" for record in records
+    )
+
+
 def _preview_command(db_path: Path) -> str:
     """Build the shell snippet fzf runs to preview the highlighted session."""
     exe = shutil.which("ocjump") or f"{shlex.quote(sys.executable)} -m ocjump"
@@ -183,9 +200,7 @@ def _pick(
 ) -> Selection | None:
     """Run fzf and return the chosen key + lines, or ``None`` on abort."""
     layout = render.layout_for(records)
-    input_data = "".join(
-        render.fzf_line(record, layout, palette, color=color) + "\n" for record in records
-    )
+    input_data = _render_lines(records, palette, color)
     key_help = render.colorize(KEY_HELP, palette, "keys") if color else KEY_HELP
     header = f"{render.fzf_header(layout)}\n{key_help}"
     argv = [
@@ -200,7 +215,7 @@ def _pick(
         f"--header={header}",
         f"--tabstop={FZF_TABSTOP}",
         "--multi",
-        f"--expect={EXPECT_KEYS}",
+        f"--expect={','.join(ACTION_KEYS)}",
     ]
     if search == "text":
         # Restrict matching to directory (4) + title (5) so typing "working"
@@ -424,6 +439,113 @@ def _close_selected(
     return "refresh"
 
 
+def _sessions_by_id(settings: Settings) -> dict[str, db.Session]:
+    """Return selectable sessions keyed by id (for close target derivation)."""
+    try:
+        with db.connect(settings.db) as conn:
+            return {session.session_id: session for session in db.list_sessions(conn)}
+    except (FileNotFoundError, OSError, db.SchemaError):
+        return {}
+
+
+def _action_fork(session_ids: list[str], settings: Settings) -> None:
+    """Fork the first selected session into a new tmux session (fzf callback)."""
+    if not session_ids:
+        return
+    session_id = session_ids[0]
+    try:
+        with db.connect(settings.db) as conn:
+            session = db.get_session(conn, session_id)
+    except (FileNotFoundError, KeyError, OSError, db.SchemaError) as exc:
+        log.log("fork_error", session_id=session_id, error=repr(exc))
+        _notify(f"fork failed: {exc}")
+        return
+    resolved = resolve_command(settings.command)
+    if resolved is None:
+        log.log("command_not_found", command=settings.command)
+        _notify(f"command not found: {settings.command} (set --command)")
+        return
+    label, results = open_session(
+        session, resolved, "session", settings.session_prefix, fork=True
+    )
+    created = results[0]
+    log.log("fork", session_id=session_id, code=created.returncode, target=label)
+    if created.returncode != 0:
+        _notify(f"fork failed ({created.returncode}): {created.stderr.strip()}")
+    else:
+        _notify(f"forked {session.title} ({label})")
+
+
+def _action_delete(session_ids: list[str], settings: Settings) -> None:
+    """Delete the selected sessions (fzf callback)."""
+    if not session_ids:
+        return
+    resolved = resolve_command(settings.command)
+    if resolved is None:
+        log.log("command_not_found", command=settings.command)
+        _notify(f"command not found: {settings.command} (set --command)")
+        return
+    _notify(f"deleting {len(session_ids)} session(s)…")
+    start = time.perf_counter()
+    results = delete_sessions(resolved, session_ids)
+    codes = [result.returncode for result in results]
+    log.log(
+        "delete",
+        count=len(session_ids),
+        codes=codes,
+        delete_ms=round((time.perf_counter() - start) * 1000, 1),
+    )
+    failed = [result for result in results if result.returncode != 0]
+    if failed:
+        _notify(f"delete failed ({failed[0].returncode}): {failed[0].stderr.strip()}")
+    else:
+        _notify(f"deleted {len(session_ids)} session(s)")
+
+
+def _action_close(session_ids: list[str], settings: Settings) -> None:
+    """Close the tmux session(s) hosting the selection (fzf callback)."""
+    if not session_ids:
+        return
+    _, panes_by_id = _records(settings, include_children=False)
+    bound = {pane.bound_session_id: pane for pane in panes_by_id.values()}
+    sessions = _sessions_by_id(settings)
+    existing = existing_session_names()
+    names: list[str] = []
+    for session_id in session_ids:
+        pane = bound.get(session_id)
+        if pane is not None:
+            name = pane.session_name
+        else:
+            session = sessions.get(session_id)
+            name = session_name(session.title, (), settings.session_prefix) if session else ""
+            if name not in existing:
+                continue
+        if name and name not in names:
+            names.append(name)
+    if not names:
+        _notify("no tmux session to close for the selection")
+        return
+    results = close_sessions(names)
+    codes = [result.returncode for result in results]
+    log.log("close", names=names, codes=codes)
+    failed = [result for result in results if result.returncode != 0]
+    if failed:
+        _notify(f"close failed ({failed[0].returncode}): {failed[0].stderr.strip()}")
+    else:
+        _notify(f"closed {len(names)} tmux session(s)")
+
+
+def _action_contract(action: str, session_ids: list[str], settings: Settings) -> None:
+    """Run a bound action; only forks/delete/close are valid callbacks."""
+    log.log("action", name=action, count=len(session_ids))
+    if action == "fork":
+        _action_fork(session_ids, settings)
+    elif action == "delete":
+        _action_delete(session_ids, settings)
+    elif action == "close":
+        _action_close(session_ids, settings)
+
+
 def _dispatch(
     selection: Selection, panes_by_id: dict[str, Pane], settings: Settings
 ) -> str:
@@ -465,6 +587,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ocjump: {exc}", file=sys.stderr)
         _notify(f"config error: {exc}")
         return 1
+
+    if args.list_lines:
+        records, _ = _records(settings, args.all)
+        sys.stdout.write(_render_lines(records, palette, color=_use_color()))
+        return 0
+
+    if args.action:
+        _action_contract(args.action, args.session, settings)
+        return 0
 
     if args.preview:
         log.log(
