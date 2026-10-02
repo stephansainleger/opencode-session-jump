@@ -7,6 +7,12 @@ directory. Each row also carries the session's live state — `working`,
 `waiting` (permission or question), `done`, `error` — published by a small
 companion OpenCode plugin.
 
+![ocjump picker, with the delete confirmation in the footer](docs/ocjump.gif)
+
+*The real picker (opencode theme, 24-bit color) over fictional sessions, filtering
+and arming a delete confirmation. Regenerate the demo with
+`python3 tools/render-demo.py` (needs `asciinema` and `agg`).*
+
 > **Platform:** Linux + tmux ≥ 3.2 only (it drives `tmux` and reads the
 > OpenCode SQLite store directly). Tested against OpenCode **1.18.x**.
 
@@ -97,13 +103,7 @@ legend. Deleting several sessions runs the `opencode` processes in a small
 thread pool (each `opencode` call has a ~1s startup), so the cost is a few
 runtimes rather than one per session.
 
-### Example
-
-![ocjump picker, with the delete confirmation in the footer](docs/ocjump.gif)
-
-*The real picker (opencode theme, 24-bit color) over fictional sessions, filtering
-and arming a delete confirmation. Regenerate the demo with
-`python3 tools/render-demo.py` (needs `asciinema` and `agg`).*
+### Layout
 
 The preview pane (right) shows the session metadata and its last messages.
 Columns are `state · age · directory · title`. Label, age and directory are
