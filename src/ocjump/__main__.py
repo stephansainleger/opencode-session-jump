@@ -120,6 +120,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--session", nargs="+", default=[], metavar="SESSION_ID", help=argparse.SUPPRESS
     )
+    parser.add_argument(
+        "--result-file",
+        metavar="PATH",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--version", action="version", version=f"ocjump {__version__}")
     return parser
 
@@ -215,13 +220,20 @@ def _preview_command(db_path: Path) -> str:
     return f"{_exe()} --preview {{6}} --db {shlex.quote(str(db_path))}"
 
 
-def _callback(settings: Settings, action: str, sessions: str = "{+6}") -> str:
+def _callback(
+    settings: Settings, action: str, sessions: str = "{+6}", result_file: str | None = None
+) -> str:
     """Build the ``--action`` callback command applied to ``sessions``.
 
     ``sessions`` defaults to fzf's marked-rows placeholder; the destructive
-    confirmation substitutes the ids captured when the key was armed.
+    confirmation substitutes the ids captured when the key was armed.  When
+    ``result_file`` is given, the callback writes its outcome there instead of
+    notifying immediately, so the message can be shown after the list refresh.
     """
-    return f"{_exe()} --action {action} {_common_args(settings)} --session {sessions}"
+    command = f"{_exe()} --action {action} {_common_args(settings)} --session {sessions}"
+    if result_file:
+        command += f" --result-file {shlex.quote(result_file)}"
+    return command
 
 
 def _reload_command(settings: Settings) -> str:
@@ -244,10 +256,14 @@ def _bindings(settings: Settings, state_dir: Path) -> list[str]:
     """
     fresh = _reload_command(settings)
     header_file = shlex.quote(str(state_dir / "header"))
+    result_file = state_dir / "result"
+    result = shlex.quote(str(result_file))
     pending = {a: shlex.quote(str(state_dir / f"pending-{a}")) for a in ACTIONS}
     message = {a: shlex.quote(str(state_dir / f"msg-{a}")) for a in ACTIONS}
     callback = {
-        a: _callback(settings, a, sessions=f"$(cat {pending[a]})")
+        a: _callback(
+            settings, a, sessions=f"$(cat {pending[a]})", result_file=str(result_file)
+        )
         for a in ("delete", "close")
     }
     bindings = [
@@ -269,14 +285,22 @@ def _bindings(settings: Settings, state_dir: Path) -> list[str]:
         )
         bindings.append(f"{key}:execute-silent({arm})+transform-header({paint})")
     confirm = (
+        f"rm -f {result}; "
         f"if [ -e {pending['delete']} ]; then {callback['delete']}; "
         f"rm -f {pending['delete']}; "
         f"elif [ -e {pending['close']} ]; then {callback['close']}; "
         f"rm -f {pending['close']}; fi"
     )
+    # The outcome is notified only once the refresh has happened, so the message
+    # is a faithful marker of when the visible list actually changed.
+    notify = (
+        f"if [ -s {result} ]; then tmux display-message -d {NOTIFY_MS} "
+        f"\"$(cat {result})\"; rm -f {result}; fi"
+    )
     bindings.append(
         f"{CONFIRM_KEY}:execute-silent({confirm})"
         f"+transform-header(cat {header_file})+reload-sync({fresh})"
+        f"+execute-silent({notify})"
     )
     return bindings
 
@@ -355,6 +379,20 @@ def _notify(message: str, runner: Runner = run) -> None:
     the status line survives long enough for the user to read the outcome.
     """
     runner(["tmux", "display-message", "-d", NOTIFY_MS, f"ocjump: {message}"])
+
+
+def _report(message: str, result_file: str | None) -> None:
+    """Deliver an action outcome now, or queue it for the post-refresh notify.
+
+    With ``result_file`` set, the message is written there and shown by a later
+    binding action (after ``reload-sync``) so the status line never announces
+    "deleted" before the visible list actually reflects it.  Without it, the
+    message is shown immediately.
+    """
+    if result_file:
+        Path(result_file).write_text(f"ocjump: {message}", encoding="utf-8")
+    else:
+        _notify(message)
 
 
 def _open_selected(result: PickerResult, settings: Settings) -> None:
@@ -452,7 +490,9 @@ def _action_fork(session_ids: list[str], settings: Settings) -> None:
         _notify(f"forked {session.title} ({label})")
 
 
-def _action_delete(session_ids: list[str], settings: Settings) -> None:
+def _action_delete(
+    session_ids: list[str], settings: Settings, result_file: str | None = None
+) -> None:
     """Delete the selected sessions (fzf callback)."""
     if not session_ids:
         return
@@ -473,12 +513,14 @@ def _action_delete(session_ids: list[str], settings: Settings) -> None:
     )
     failed = [result for result in results if result.returncode != 0]
     if failed:
-        _notify(f"delete failed ({failed[0].returncode}): {failed[0].stderr.strip()}")
+        _report(f"delete failed ({failed[0].returncode}): {failed[0].stderr.strip()}", result_file)
     else:
-        _notify(f"deleted {len(session_ids)} session(s)")
+        _report(f"deleted {len(session_ids)} session(s)", result_file)
 
 
-def _action_close(session_ids: list[str], settings: Settings) -> None:
+def _action_close(
+    session_ids: list[str], settings: Settings, result_file: str | None = None
+) -> None:
     """Close the tmux session(s) hosting the selection (fzf callback)."""
     if not session_ids:
         return
@@ -499,27 +541,29 @@ def _action_close(session_ids: list[str], settings: Settings) -> None:
         if name and name not in names:
             names.append(name)
     if not names:
-        _notify("no tmux session to close for the selection")
+        _report("no tmux session to close for the selection", result_file)
         return
     results = close_sessions(names)
     codes = [result.returncode for result in results]
     log.log("close", names=names, codes=codes)
     failed = [result for result in results if result.returncode != 0]
     if failed:
-        _notify(f"close failed ({failed[0].returncode}): {failed[0].stderr.strip()}")
+        _report(f"close failed ({failed[0].returncode}): {failed[0].stderr.strip()}", result_file)
     else:
-        _notify(f"closed {len(names)} tmux session(s)")
+        _report(f"closed {len(names)} tmux session(s)", result_file)
 
 
-def _action_contract(action: str, session_ids: list[str], settings: Settings) -> None:
+def _action_contract(
+    action: str, session_ids: list[str], settings: Settings, result_file: str | None = None
+) -> None:
     """Run a bound action; only forks/delete/close are valid callbacks."""
     log.log("action", name=action, count=len(session_ids))
     if action == "fork":
         _action_fork(session_ids, settings)
     elif action == "delete":
-        _action_delete(session_ids, settings)
+        _action_delete(session_ids, settings, result_file)
     elif action == "close":
-        _action_close(session_ids, settings)
+        _action_close(session_ids, settings, result_file)
 
 
 def _load_settings(args: argparse.Namespace) -> Settings:
@@ -554,7 +598,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.action:
-        _action_contract(args.action, args.session, settings)
+        _action_contract(args.action, args.session, settings, args.result_file)
         return 0
 
     if args.preview:
