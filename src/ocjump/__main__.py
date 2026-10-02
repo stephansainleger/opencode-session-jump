@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,11 +38,16 @@ _IMPORT_TIME = time.perf_counter()
 
 FZF_TABSTOP = "2"
 SEARCH_TEXT_FIELDS = "4,5"  # directory + title (fields 1..7: glyph,label,age,dir,title,id,pane)
-ACTION_KEYS = ("ctrl-f", "ctrl-d", "ctrl-k")
-ACTIONS = ("fork", "delete", "close")
+ACTION_KEYS = {"ctrl-f": "fork", "ctrl-d": "delete", "ctrl-k": "close"}
+ACTIONS = tuple(ACTION_KEYS.values())
+CONFIRM_KEY = "ctrl-y"  # fzf's reload clears the multi-selection, so the arm
+# key only paints a prompt and the destructive action fires on a second key.
 BORDER_LABEL = " sessions "
 # Second header line, shown at the bottom of the popup under the column legend.
-KEY_HELP = "Enter open · ctrl-f fork · ctrl-d delete · ctrl-k close · Tab multi · Esc quit"
+KEY_HELP = (
+    "Enter open · ctrl-f fork · ctrl-d delete · ctrl-k close · ctrl-y confirm · Tab multi"
+    " · Esc quit"
+)
 PREVIEW_LABEL = " preview "
 NOTIFY_MS = "5000"
 
@@ -61,11 +67,11 @@ class Settings:
 
 
 @dataclass(frozen=True)
-class Selection:
-    """Outcome of the picker: the key pressed (``""`` for Enter) and the lines."""
+class PickerResult:
+    """What the fzf picker returned: an accepted session, or nothing (abort)."""
 
-    key: str
-    lines: list[str]
+    session_id: str = ""
+    pane_id: str = ""
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -112,7 +118,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--list-lines", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--action", choices=ACTIONS, help=argparse.SUPPRESS)
     parser.add_argument(
-        "--session", action="append", default=[], metavar="SESSION_ID", help=argparse.SUPPRESS
+        "--session", nargs="+", default=[], metavar="SESSION_ID", help=argparse.SUPPRESS
     )
     parser.add_argument("--version", action="version", version=f"ocjump {__version__}")
     return parser
@@ -185,86 +191,161 @@ def _render_lines(
     )
 
 
+def _exe() -> str:
+    """Return the command used to re-invoke ocjump from fzf bindings."""
+    return shutil.which("ocjump") or f"{shlex.quote(sys.executable)} -m ocjump"
+
+
+def _common_args(settings: Settings) -> str:
+    """Shell flags reproducing the effective settings for a callback run.
+
+    Only the store path and the two flags that change output matter: the DB,
+    ``--no-state`` and a non-default ``--command``.
+    """
+    parts = ["--db", shlex.quote(str(settings.db))]
+    if settings.no_state:
+        parts.append("--no-state")
+    if settings.command != config.DEFAULT_COMMAND:
+        parts += ["--command", shlex.quote(settings.command)]
+    return " ".join(parts)
+
+
 def _preview_command(db_path: Path) -> str:
     """Build the shell snippet fzf runs to preview the highlighted session."""
-    exe = shutil.which("ocjump") or f"{shlex.quote(sys.executable)} -m ocjump"
-    return f"{exe} --preview {{6}} --db {shlex.quote(str(db_path))}"
+    return f"{_exe()} --preview {{6}} --db {shlex.quote(str(db_path))}"
+
+
+def _callback(settings: Settings, action: str, sessions: str = "{+6}") -> str:
+    """Build the ``--action`` callback command applied to ``sessions``.
+
+    ``sessions`` defaults to fzf's marked-rows placeholder; the destructive
+    confirmation substitutes the ids captured when the key was armed.
+    """
+    return f"{_exe()} --action {action} {_common_args(settings)} --session {sessions}"
+
+
+def _reload_command(settings: Settings) -> str:
+    """Build the ``--list-lines`` command that refreshes fzf in place."""
+    return f"{_exe()} --list-lines {_common_args(settings)}"
+
+
+def _bindings(settings: Settings, state_dir: Path) -> list[str]:
+    """Return one ``--bind`` spec per action key.
+
+    ``fork`` runs immediately (``execute-silent`` never switches screens, so the
+    popup is not blanked) then refreshes the list in place (``reload-sync``).
+
+    Destructive keys are a two-step: ``ctrl-d`` / ``ctrl-k`` snapshot the marked
+    ids and paint a confirmation in the footer (``transform-header``); the action
+    fires only on ``ctrl-y``.  Two keys are needed because ``reload-sync`` clears
+    fzf's multi-selection: the arm step must not reload, so the marks (and the
+    cursor) stay visible while the user confirms.  The frozen state lives in
+    files under ``state_dir`` and the branching is done in the shell snippets.
+    """
+    fresh = _reload_command(settings)
+    header_file = shlex.quote(str(state_dir / "header"))
+    pending = {a: shlex.quote(str(state_dir / f"pending-{a}")) for a in ACTIONS}
+    message = {a: shlex.quote(str(state_dir / f"msg-{a}")) for a in ACTIONS}
+    callback = {
+        a: _callback(settings, a, sessions=f"$(cat {pending[a]})")
+        for a in ("delete", "close")
+    }
+    bindings = [
+        f"ctrl-f:execute-silent(rm -f {pending['delete']} {pending['close']}; "
+        f"{_callback(settings, 'fork')})+reload-sync({fresh})"
+    ]
+    for key, action, label in (("ctrl-d", "delete", "Delete"), ("ctrl-k", "close", "Close")):
+        other = "close" if action == "delete" else "delete"
+        arm = (
+            f"set -- {{+6}}; [ $# -gt 0 ] && "
+            f"printf '%s\\n' \"$@\" > {pending[action]} && "
+            f"printf '%s' \"{label} $# session(s)?  press {CONFIRM_KEY} "
+            f"to confirm  ·  Esc to cancel\" > {message[action]} && "
+            f"rm -f {pending[other]}"
+        )
+        paint = (
+            f"if [ -e {pending[action]} ]; then cat {message[action]}; "
+            f"else cat {header_file}; fi"
+        )
+        bindings.append(f"{key}:execute-silent({arm})+transform-header({paint})")
+    confirm = (
+        f"if [ -e {pending['delete']} ]; then {callback['delete']}; "
+        f"rm -f {pending['delete']}; "
+        f"elif [ -e {pending['close']} ]; then {callback['close']}; "
+        f"rm -f {pending['close']}; fi"
+    )
+    bindings.append(
+        f"{CONFIRM_KEY}:execute-silent({confirm})"
+        f"+transform-header(cat {header_file})+reload-sync({fresh})"
+    )
+    return bindings
+
+
+def _parser_selection(stdout: str) -> PickerResult:
+    """Parse fzf output into the accepted session (``--print-query`` adds a line)."""
+    for line in stdout.split("\n"):
+        fields = line.split(render.FIELD_SEP)
+        if len(fields) == 7:
+            return PickerResult(session_id=fields[5], pane_id=fields[6])
+    return PickerResult()
 
 
 def _pick(
     records: list[render.Record],
-    db_path: Path,
+    settings: Settings,
     palette: theme.Palette,
-    search: str = config.DEFAULT_SEARCH,
     color: bool = True,
-) -> Selection | None:
-    """Run fzf and return the chosen key + lines, or ``None`` on abort."""
+) -> PickerResult:
+    """Run the single long-lived fzf picker and return the accepted session.
+
+    Key bindings perform actions in place (execute-silent + reload-sync), so a
+    single fzf process serves the whole picker session — no relaunch, no blank
+    popup.  Enter accepts (the caller then opens/jumps); Esc aborts.
+    """
     layout = render.layout_for(records)
     input_data = _render_lines(records, palette, color)
     key_help = render.colorize(KEY_HELP, palette, "keys") if color else KEY_HELP
     header = f"{render.fzf_header(layout)}\n{key_help}"
-    argv = [
-        "fzf",
-        f"--delimiter={render.FIELD_SEP}",
-        f"--with-nth={render.FZF_VISIBLE_FIELDS}",
-        f"--preview={_preview_command(db_path)}",
-        "--preview-window=right:50%:wrap:border-left",
-        f"--preview-label={PREVIEW_LABEL}",
-        "--border=rounded",
-        f"--border-label={BORDER_LABEL}",
-        f"--header={header}",
-        f"--tabstop={FZF_TABSTOP}",
-        "--multi",
-        f"--expect={','.join(ACTION_KEYS)}",
-    ]
-    if search == "text":
-        # Restrict matching to directory (4) + title (5) so typing "working"
-        # no longer matches every row via the state label.
-        argv.append(f"--nth={SEARCH_TEXT_FIELDS}")
-    if color:
-        argv += ["--ansi", f"--color={palette.fzf_color}"]
-    # Capture only stdout (the selection). fzf renders its interface on stderr,
-    # so stderr MUST be inherited from the caller (the tmux popup); piping it
-    # would swallow the UI and leave the popup blank.
-    log.log("pick_spawn", items=len(records))
-    pick_start = time.perf_counter()
-    proc = subprocess.run(argv, input=input_data, stdout=subprocess.PIPE, text=True)
-    log.log(
-        "pick_exit",
-        rc=proc.returncode,
-        pick_ms=round((time.perf_counter() - pick_start) * 1000, 1),
-    )
-    if proc.returncode != 0:
-        return None
-    # With --expect, fzf prints the pressed key first (empty for Enter), then
-    # one line per selected item.
-    lines = proc.stdout.split("\n")
-    key = lines[0] if lines else ""
-    chosen = [line for line in lines[1:] if line]
-    if not chosen:
-        return None
-    return Selection(key, chosen)
-
-
-def _confirm(prompt: str, lines: list[str]) -> bool:
-    """Ask a yes/no confirmation on a second fzf screen (Enter=yes, Esc=no).
-
-    Keeping the confirmation inside the popup means a whole key press is not
-    swallowed by tmux's client-level prompt, and the picker can refresh after.
-    """
-    stripped = [render.strip_ansi(line) for line in lines]
-    argv = ["fzf", f"--header={prompt}", "--no-info"]
-    log.log("confirm_spawn", items=len(stripped))
-    confirm_start = time.perf_counter()
-    proc = subprocess.run(
-        argv, input="\n".join(stripped) + "\n", stdout=subprocess.PIPE, text=True
-    )
-    log.log(
-        "confirm_exit",
-        rc=proc.returncode,
-        confirm_ms=round((time.perf_counter() - confirm_start) * 1000, 1),
-    )
-    return proc.returncode == 0
+    state_dir = Path(tempfile.mkdtemp(prefix="ocjump-"))
+    try:
+        (state_dir / "header").write_text(header, encoding="utf-8")
+        argv = [
+            "fzf",
+            f"--delimiter={render.FIELD_SEP}",
+            f"--with-nth={render.FZF_VISIBLE_FIELDS}",
+            "--print-query",
+            f"--preview={_preview_command(settings.db)}",
+            "--preview-window=right:50%:wrap:border-left",
+            f"--preview-label={PREVIEW_LABEL}",
+            "--border=rounded",
+            f"--border-label={BORDER_LABEL}",
+            f"--header={header}",
+            f"--tabstop={FZF_TABSTOP}",
+            "--multi",
+        ]
+        argv += [f"--bind={binding}" for binding in _bindings(settings, state_dir)]
+        if settings.search == "text":
+            # Restrict matching to directory (4) + title (5) so typing "working"
+            # no longer matches every row via the state label.
+            argv.append(f"--nth={SEARCH_TEXT_FIELDS}")
+        if color:
+            argv += ["--ansi", f"--color={palette.fzf_color}"]
+        # Capture only stdout (the selection). fzf renders its interface on stderr,
+        # so stderr MUST be inherited from the caller (the tmux popup); piping it
+        # would swallow the UI and leave the popup blank.
+        log.log("pick_spawn", items=len(records))
+        pick_start = time.perf_counter()
+        proc = subprocess.run(argv, input=input_data, stdout=subprocess.PIPE, text=True)
+        log.log(
+            "pick_exit",
+            rc=proc.returncode,
+            pick_ms=round((time.perf_counter() - pick_start) * 1000, 1),
+        )
+        if proc.returncode != 0:
+            return PickerResult()
+        return _parser_selection(proc.stdout)
+    finally:
+        shutil.rmtree(state_dir, ignore_errors=True)
 
 
 def _notify(message: str, runner: Runner = run) -> None:
@@ -276,49 +357,41 @@ def _notify(message: str, runner: Runner = run) -> None:
     runner(["tmux", "display-message", "-d", NOTIFY_MS, f"ocjump: {message}"])
 
 
-def _handle_selection(selected: str, panes_by_id: dict[str, Pane], settings: Settings) -> int:
-    """Act on an fzf selection: jump to its pane or open the session.
+def _open_selected(result: PickerResult, settings: Settings) -> None:
+    """Open or jump to the accepted session (best effort; logs the outcome).
 
-    Every outcome is logged and surfaced: silent failure is indistinguishable
-    from "nothing happened" once the popup closes.
+    ``Enter`` always means "go there": jump when the session is already shown
+    in a pane, otherwise open it with the configured action.
     """
-    fields = selected.split(render.FIELD_SEP)
-    if len(fields) != 7:
-        log.log("bad_selection", nfields=len(fields), line=selected)
-        _notify("unexpected selection (see log)")
-        return 1
-    session_id, pane_id = fields[5], fields[6]
-    log.log("selection", session_id=session_id, pane_id=pane_id)
-
-    if pane_id and pane_id in panes_by_id:
-        results = jump(panes_by_id[pane_id])
-        codes = [result.returncode for result in results]
-        log.log("jump", pane_id=pane_id, codes=codes)
-        failures = [result for result in results if result.returncode != 0]
-        if not failures:
-            return 0
-        _notify(f"jump failed ({failures[0].returncode}): {failures[0].stderr.strip()}")
-        return 1
-
+    if not result.session_id:
+        return
+    log.log("selection", session_id=result.session_id, pane_id=result.pane_id)
+    if result.pane_id:
+        panes_by_id = {pane.pane_id: pane for pane in list_panes()}
+        if result.pane_id in panes_by_id:
+            results = jump(panes_by_id[result.pane_id])
+            codes = [result_.returncode for result_ in results]
+            log.log("jump", pane_id=result.pane_id, codes=codes)
+            failures = [result_ for result_ in results if result_.returncode != 0]
+            if failures:
+                _notify(f"jump failed ({failures[0].returncode}): {failures[0].stderr.strip()}")
+            return
     try:
         with db.connect(settings.db) as conn:
-            session = db.get_session(conn, session_id)
+            session = db.get_session(conn, result.session_id)
     except (FileNotFoundError, KeyError, OSError, db.SchemaError) as exc:
-        log.log("open_error", session_id=session_id, error=repr(exc))
+        log.log("open_error", session_id=result.session_id, error=repr(exc))
         _notify(f"open failed: {exc}")
-        return 1
-
+        return
     if not Path(session.directory).is_dir():
-        log.log("open_missing_dir", session_id=session_id, directory=session.directory)
+        log.log("open_missing_dir", session_id=result.session_id, directory=session.directory)
         _notify(f"directory no longer exists: {session.directory}")
-        return 1
-
+        return
     resolved = resolve_command(settings.command)
     if resolved is None:
         log.log("command_not_found", command=settings.command)
         _notify(f"command not found: {settings.command} (set --command)")
-        return 1
-
+        return
     label, results = open_session(
         session, resolved, settings.open_action, settings.session_prefix
     )
@@ -326,117 +399,20 @@ def _handle_selection(selected: str, panes_by_id: dict[str, Pane], settings: Set
     if created.returncode != 0:
         log.log(
             "open_failed",
-            session_id=session_id,
+            session_id=result.session_id,
             code=created.returncode,
             stderr=created.stderr.strip(),
         )
         _notify(f"open failed ({created.returncode}): {created.stderr.strip()}")
-        return 1
+        return
     log.log(
         "open_ok",
-        session_id=session_id,
+        session_id=result.session_id,
         directory=session.directory,
         action=settings.open_action,
         target=label,
     )
     _notify(f"opened {session.title} ({settings.open_action} {label})")
-    return 0
-
-
-def _field(line: str, index: int) -> str:
-    """Return the 1-based display field ``index`` of an fzf line (or ``""``)."""
-    fields = line.split(render.FIELD_SEP)
-    return fields[index - 1] if len(fields) >= index else ""
-
-
-def _open_forked(selection: Selection, settings: Settings) -> str:
-    """Open a fork of the first selected session in a new tmux session."""
-    session_id = _field(selection.lines[0], 6)
-    try:
-        with db.connect(settings.db) as conn:
-            session = db.get_session(conn, session_id)
-    except (FileNotFoundError, KeyError, OSError, db.SchemaError) as exc:
-        log.log("fork_error", session_id=session_id, error=repr(exc))
-        _notify(f"fork failed: {exc}")
-        return "refresh"
-    resolved = resolve_command(settings.command)
-    if resolved is None:
-        log.log("command_not_found", command=settings.command)
-        _notify(f"command not found: {settings.command} (set --command)")
-        return "refresh"
-    label, results = open_session(
-        session, resolved, "session", settings.session_prefix, fork=True
-    )
-    created = results[0]
-    if created.returncode != 0:
-        log.log(
-            "fork_failed",
-            session_id=session_id,
-            code=created.returncode,
-            stderr=created.stderr.strip(),
-        )
-        _notify(f"fork failed ({created.returncode}): {created.stderr.strip()}")
-        return "refresh"
-    log.log("fork_ok", session_id=session_id, target=label)
-    _notify(f"forked {session.title} ({label})")
-    return "exit"
-
-
-def _delete_selected(selection: Selection, settings: Settings) -> str:
-    """Delete the selected sessions (delegated to ``opencode session delete``)."""
-    ids = [_field(line, 6) for line in selection.lines]
-    if not _confirm(f"Delete {len(ids)} session(s)?  Enter=yes  Esc=no", selection.lines):
-        return "refresh"
-    resolved = resolve_command(settings.command)
-    if resolved is None:
-        log.log("command_not_found", command=settings.command)
-        _notify(f"command not found: {settings.command} (set --command)")
-        return "refresh"
-    _notify(f"deleting {len(ids)} session(s)…")
-    delete_start = time.perf_counter()
-    results = delete_sessions(resolved, ids)
-    delete_ms = (time.perf_counter() - delete_start) * 1000
-    codes = [result.returncode for result in results]
-    log.log("delete", count=len(ids), codes=codes, delete_ms=round(delete_ms, 1))
-    if all(code == 0 for code in codes):
-        _notify(f"deleted {len(ids)} session(s)")
-    else:
-        failed = [result for result in results if result.returncode != 0]
-        _notify(f"delete failed ({failed[0].returncode}): {failed[0].stderr.strip()}")
-    return "refresh"
-
-
-def _close_selected(
-    selection: Selection, panes_by_id: dict[str, Pane], settings: Settings
-) -> str:
-    """Close the tmux session(s) hosting the selection, after confirmation."""
-    existing = existing_session_names()
-    names: list[str] = []
-    for line in selection.lines:
-        pane_id = _field(line, 7)
-        if pane_id and pane_id in panes_by_id:
-            name = panes_by_id[pane_id].session_name
-        else:
-            name = session_name(_field(line, 5), (), settings.session_prefix)
-            if name not in existing:
-                continue
-        if name not in names:
-            names.append(name)
-    if not names:
-        _notify("no tmux session to close for the selection")
-        return "refresh"
-    prompt = f"Close {len(names)} tmux session(s)?  Enter=yes  Esc=no"
-    if not _confirm(prompt, selection.lines):
-        return "refresh"
-    results = close_sessions(names)
-    codes = [result.returncode for result in results]
-    log.log("close", names=names, codes=codes)
-    if all(code == 0 for code in codes):
-        _notify(f"closed {len(names)} tmux session(s)")
-    else:
-        failed = [result for result in results if result.returncode != 0]
-        _notify(f"close failed ({failed[0].returncode}): {failed[0].stderr.strip()}")
-    return "refresh"
 
 
 def _sessions_by_id(settings: Settings) -> dict[str, db.Session]:
@@ -546,22 +522,6 @@ def _action_contract(action: str, session_ids: list[str], settings: Settings) ->
         _action_close(session_ids, settings)
 
 
-def _dispatch(
-    selection: Selection, panes_by_id: dict[str, Pane], settings: Settings
-) -> str:
-    """Perform the action bound to the pressed key; return ``refresh`` or ``exit``."""
-    if selection.key == "":
-        code = _handle_selection(selection.lines[0], panes_by_id, settings)
-        return "exit" if code == 0 else "refresh"
-    if selection.key == "ctrl-f":
-        return _open_forked(selection, settings)
-    if selection.key == "ctrl-d":
-        return _delete_selected(selection, settings)
-    if selection.key == "ctrl-k":
-        return _close_selected(selection, panes_by_id, settings)
-    return "refresh"
-
-
 def _load_settings(args: argparse.Namespace) -> Settings:
     """Merge CLI flags over the config file into effective settings."""
     cfg = config.load()
@@ -615,7 +575,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        records, panes_by_id = _records(settings, args.all)
+        records, _ = _records(settings, args.all)
     except (FileNotFoundError, sqlite3.Error, db.SchemaError) as exc:
         log.log("startup_error", error=repr(exc))
         _notify(f"cannot read store: {exc}")
@@ -627,23 +587,15 @@ def main(argv: list[str] | None = None) -> int:
     if not shutil.which("fzf"):
         print("ocjump: fzf not found on PATH", file=sys.stderr)
         return 1
-    while True:
-        log.log("start", sessions=len(records), panes=len(panes_by_id))
-        selection = _pick(
-            records, settings.db, palette, settings.search, color=_use_color()
-        )
-        if selection is None:
-            log.log("cancelled")
-            return 0
-        log.log("picked", key=selection.key, count=len(selection.lines))
-        if _dispatch(selection, panes_by_id, settings) == "exit":
-            return 0
-        try:
-            records, panes_by_id = _records(settings, args.all)
-        except (FileNotFoundError, sqlite3.Error, db.SchemaError) as exc:
-            log.log("refresh_error", error=repr(exc))
-            _notify(f"cannot read store: {exc}")
-            return 1
+    # A single fzf process serves the whole picker: actions run in place
+    # (execute-silent + reload-sync) and Enter returns the accepted session.
+    log.log("start", sessions=len(records))
+    result = _pick(records, settings, palette, color=_use_color())
+    if not result.session_id:
+        log.log("cancelled")
+        return 0
+    _open_selected(result, settings)
+    return 0
 
 
 if __name__ == "__main__":

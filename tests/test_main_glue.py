@@ -52,133 +52,152 @@ PANE = Pane(
 )
 
 
-class PickTest(unittest.TestCase):
-    """The fzf call must hide ids and use ocjump itself for the preview."""
+def _settings(tmp_path: Path) -> main_mod.Settings:
+    """Build settings pointing at ``tmp_path/opencode.db``."""
+    return main_mod.Settings(
+        db=tmp_path, command="opencode", open_action="session", session_prefix="oc-"
+    )
 
-    def test_pick_builds_fzf_argv_and_returns_selection(self) -> None:
-        """The fzf call previews field 6 and parses the --expect output."""
-        record = render.Record(SESSION, PANE, now_ms=2_000_000)
-        line = render.fzf_line(record, render.layout_for([record]), PALETTE)
+
+def _record() -> render.Record:
+    """Return a representative record with a bound pane."""
+    return render.Record(SESSION, PANE, now_ms=2_000_000)
+
+
+class PickTest(unittest.TestCase):
+    """The single fzf call: argv, stream, color and output parsing."""
+
+    def setUp(self) -> None:
+        """Create settings for the picker under a throwaway store."""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.settings = _settings(Path(self.tmp.name) / "opencode.db")
+
+    def _capture(self, stdout: str, returncode: int = 0):  # noqa: ANN202 - test helper
         captured = {}
 
         def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
             captured["argv"] = argv
             captured["kwargs"] = kwargs
-            # --expect prints the pressed key first (empty for Enter), then items.
-            return Result(tuple(argv), 0, "\n" + line + "\n", "")
+            captured["input"] = kwargs.get("input")
+            return Result(tuple(argv), returncode, stdout, "")
 
         with mock.patch.object(main_mod.subprocess, "run", fake_run):
-            selection = main_mod._pick([record], Path("/tmp/x.db"), PALETTE)
+            result = main_mod._pick([_record()], self.settings, PALETTE)
+        return result, captured
 
-        self.assertEqual(selection.key, "")
-        self.assertEqual(selection.lines, [line])
-        self.assertIn("--delimiter=\t", captured["argv"])
+    def test_pick_parses_the_accepted_session(self) -> None:
+        """--print-query adds a line; the seven-field line carries id and pane."""
+        record = _record()
+        line = render.fzf_line(record, render.layout_for([record]), PALETTE)
+        result, captured = self._capture("query\n" + line + "\n")
+        self.assertEqual(result.session_id, "ses_a")
+        self.assertEqual(result.pane_id, "%1")
+        self.assertIn("--print-query", captured["argv"])
         self.assertIn("--multi", captured["argv"])
-        self.assertIn("--expect=ctrl-f,ctrl-d,ctrl-k", captured["argv"])
         self.assertTrue(any(arg.startswith("--preview=") for arg in captured["argv"]))
         self.assertTrue(any("{6}" in arg for arg in captured["argv"]))
         header = next(arg for arg in captured["argv"] if arg.startswith("--header="))
         self.assertIn("directory", header)
         self.assertIn("ctrl-d", header)  # shortcuts legend on the second line
 
-    def test_pick_returns_the_pressed_key(self) -> None:
-        """A non-Enter key is reported so the dispatcher can act on it."""
-        record = render.Record(SESSION, PANE, 2_000_000)
-        line = render.fzf_line(record, render.layout_for([record]), PALETTE)
+    def test_pick_binds_actions_to_reload_in_place(self) -> None:
+        """Fork reloads immediately; the confirm key reloads after firing."""
+        _, captured = self._capture("")
+        binds = {
+            arg.split(":", 1)[0].removeprefix("--bind="): arg
+            for arg in captured["argv"]
+            if arg.startswith("--bind=")
+        }
+        for key in ("ctrl-f", "ctrl-d", "ctrl-k", "ctrl-y"):
+            self.assertIn(key, binds)
+        self.assertIn("+reload-sync(", binds["ctrl-f"])
+        self.assertIn("+reload-sync(", binds["ctrl-y"])
+        self.assertIn("--action delete", binds["ctrl-y"])
+        # Arming must not reload: fzf's reload would clear the marks.
+        self.assertNotIn("reload-sync", binds["ctrl-d"])
+        self.assertNotIn("reload-sync", binds["ctrl-k"])
 
-        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
-            return Result(tuple(argv), 0, "ctrl-d\n" + line + "\n", "")
+    def test_destructive_keys_confirm_in_the_footer(self) -> None:
+        """ctrl-d / ctrl-k arm a footer prompt; ctrl-y fires; fork is immediate."""
+        _, captured = self._capture("")
+        binds = {
+            arg.split(":", 1)[0].removeprefix("--bind="): arg
+            for arg in captured["argv"]
+            if arg.startswith("--bind=")
+        }
+        self.assertNotIn("transform-header", binds["ctrl-f"])
+        for key in ("ctrl-d", "ctrl-k"):
+            bind = binds[key]
+            self.assertIn("transform-header(", bind)
+            self.assertIn("ctrl-y", bind)  # points at the confirm key
+            self.assertIn("to confirm", bind)
+            self.assertIn("Esc to cancel", bind)
+            self.assertIn("$#", bind)  # count of marked rows
+            self.assertIn(f"--bind={key}:execute-silent(set -- {{+6}}", bind)
+        # The confirm key snapshots the ids at arm time, then fires and reloads.
+        confirm = binds["ctrl-y"]
+        self.assertIn("$(cat ", confirm)
+        self.assertIn("rm -f ", confirm)
+        self.assertIn("--action close", confirm)
 
-        with mock.patch.object(main_mod.subprocess, "run", fake_run):
-            selection = main_mod._pick([record], Path("/tmp/x.db"), PALETTE)
-        self.assertEqual(selection.key, "ctrl-d")
-        self.assertEqual(selection.lines, [line])
+    def test_pick_returns_empty_on_abort(self) -> None:
+        """A non-zero fzf exit yields an empty result (cancel)."""
+        result, _ = self._capture("", returncode=130)
+        self.assertEqual(result.session_id, "")
+
+    def test_pick_returns_empty_without_a_selected_line(self) -> None:
+        """A query but no accepted line is treated as no selection."""
+        result, _ = self._capture("just a query\n")
+        self.assertEqual(result.session_id, "")
 
     def test_pick_does_not_pipe_fzf_stderr(self) -> None:
         """The fzf UI renders on stderr; piping it blanks the popup (regression)."""
-        captured = {}
-
-        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
-            captured["kwargs"] = kwargs
-            return Result(tuple(argv), 0, "", "")
-
-        with mock.patch.object(main_mod.subprocess, "run", fake_run):
-            main_mod._pick([render.Record(SESSION, PANE, 2_000_000)], Path("/tmp/x.db"), PALETTE)
-
+        _, captured = self._capture("")
         self.assertNotEqual(captured["kwargs"].get("capture_output"), True)
         self.assertIsNone(captured["kwargs"].get("stderr"))
 
-    def test_pick_returns_none_on_abort(self) -> None:
-        """A non-zero fzf exit is treated as a cancel."""
-
-        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
-            return Result(tuple(argv), 130, "", "")
-
-        with mock.patch.object(main_mod.subprocess, "run", fake_run):
-            self.assertIsNone(main_mod._pick([], Path("/tmp/x.db"), PALETTE))
-
     def test_pick_restricts_search_to_text_by_default(self) -> None:
         """Default search matches directory+title only (--nth=4,5)."""
-        captured = {}
-
-        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
-            captured["argv"] = argv
-            return Result(tuple(argv), 0, "", "")
-
-        record = render.Record(SESSION, PANE, now_ms=2_000_000)
-        with mock.patch.object(main_mod.subprocess, "run", fake_run):
-            main_mod._pick([record], Path("/tmp/x.db"), PALETTE)
+        _, captured = self._capture("")
         self.assertIn("--nth=4,5", captured["argv"])
 
     def test_pick_search_all_drops_nth(self) -> None:
         """``search=all`` searches every displayed field (no --nth)."""
+        settings = main_mod.Settings(
+            db=self.settings.db,
+            command="opencode",
+            open_action="session",
+            session_prefix="oc-",
+            search="all",
+        )
         captured = {}
 
-        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
+        def capturing_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
             captured["argv"] = argv
             return Result(tuple(argv), 0, "", "")
 
-        record = render.Record(SESSION, PANE, now_ms=2_000_000)
-        with mock.patch.object(main_mod.subprocess, "run", fake_run):
-            main_mod._pick([record], Path("/tmp/x.db"), PALETTE, "all")
+        with mock.patch.object(main_mod.subprocess, "run", capturing_run):
+            main_mod._pick([_record()], settings, PALETTE)
         self.assertFalse(any(arg.startswith("--nth=") for arg in captured["argv"]))
 
-    def test_pick_enables_ansi_when_colored(self) -> None:
-        """Colored mode passes --ansi and a color scheme, and colors the input."""
-        captured = {}
+    def test_pick_color_is_opt_out(self) -> None:
+        """Colored mode passes --ansi; plain mode omits it entirely."""
+        _, colored = self._capture("")
+        self.assertIn("--ansi", colored["argv"])
+        self.assertIn("\x1b[", colored["input"])
+
+        plain_capture = {}
 
         def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
-            captured["argv"] = argv
-            captured["input"] = kwargs.get("input")
+            plain_capture["argv"] = argv
+            plain_capture["input"] = kwargs.get("input")
             return Result(tuple(argv), 0, "", "")
 
-        record = render.Record(SESSION, PANE, now_ms=2_000_000)
         with mock.patch.object(main_mod.subprocess, "run", fake_run):
-            main_mod._pick([record], Path("/tmp/x.db"), PALETTE, color=True)
-
-        self.assertIn("--ansi", captured["argv"])
-        self.assertTrue(any(arg.startswith("--color=") for arg in captured["argv"]))
-        self.assertIn("\x1b[", captured["input"])
-        header = next(arg for arg in captured["argv"] if arg.startswith("--header="))
-        self.assertIn("\x1b[", header)  # shortcut legend is colored
-
-    def test_pick_omits_color_when_disabled(self) -> None:
-        """Plain mode sends neither --ansi nor ANSI codes."""
-        captured = {}
-
-        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
-            captured["argv"] = argv
-            captured["input"] = kwargs.get("input")
-            return Result(tuple(argv), 0, "", "")
-
-        record = render.Record(SESSION, PANE, now_ms=2_000_000)
-        with mock.patch.object(main_mod.subprocess, "run", fake_run):
-            main_mod._pick([record], Path("/tmp/x.db"), PALETTE, color=False)
-
-        self.assertNotIn("--ansi", captured["argv"])
-        self.assertNotIn("\x1b[", captured["input"])
-        header = next(arg for arg in captured["argv"] if arg.startswith("--header="))
-        self.assertNotIn("\x1b[", header)
+            main_mod._pick([_record()], self.settings, PALETTE, color=False)
+        self.assertNotIn("--ansi", plain_capture["argv"])
+        self.assertNotIn("\x1b[", plain_capture["input"])
 
     def test_use_color_honors_no_color(self) -> None:
         """$NO_COLOR disables color output."""
@@ -186,6 +205,47 @@ class PickTest(unittest.TestCase):
             self.assertFalse(main_mod._use_color())
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertTrue(main_mod._use_color())
+
+
+class BindingsTest(unittest.TestCase):
+    """The generated fzf --bind spec and callback commands."""
+
+    def setUp(self) -> None:
+        """Build settings for bind generation."""
+        self.settings = main_mod.Settings(
+            db=Path("/tmp/x.db"), command="opencode", open_action="session",
+            session_prefix="oc-",
+        )
+
+    def test_callback_carries_the_settings(self) -> None:
+        """The callback re-invokes ocjump with the store and the marked ids."""
+        cmd = main_mod._callback(self.settings, "delete")
+        self.assertIn("--action delete", cmd)
+        self.assertIn("--db /tmp/x.db", cmd)
+        self.assertIn("--session {+6}", cmd)
+
+    def test_callback_includes_non_default_command(self) -> None:
+        """A non-default executable is propagated to the callback."""
+        settings = main_mod.Settings(
+            db=Path("/tmp/x.db"), command="/opt/opencode", open_action="session",
+            session_prefix="oc-",
+        )
+        self.assertIn("--command /opt/opencode", main_mod._callback(settings, "fork"))
+
+    def test_reload_uses_list_lines(self) -> None:
+        """The reload command regenerates the input stream."""
+        self.assertIn("--list-lines", main_mod._reload_command(self.settings))
+
+    def test_bindings_use_the_picker_state_dir(self) -> None:
+        """The header, pending ids and confirm messages live under the state dir."""
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            joined = "".join(main_mod._bindings(self.settings, state))
+        self.assertIn(str(state / "header"), joined)
+        self.assertIn(str(state / "pending-delete"), joined)
+        self.assertIn(str(state / "pending-close"), joined)
+        self.assertIn(str(state / "msg-delete"), joined)
+        self.assertIn(str(state / "msg-close"), joined)
 
 
 class NotifyTest(unittest.TestCase):
@@ -204,8 +264,8 @@ class NotifyTest(unittest.TestCase):
         self.assertTrue(calls[0][-1].endswith("ocjump: hello"))
 
 
-class HandleSelectionTest(unittest.TestCase):
-    """A selection either jumps to its pane or opens a new window."""
+class OpenSelectedTest(unittest.TestCase):
+    """Enter either jumps to the bound pane or opens the session."""
 
     def setUp(self) -> None:
         """Create a store whose session directory exists, and redirect the log."""
@@ -225,174 +285,42 @@ class HandleSelectionTest(unittest.TestCase):
         path = Path(self.tmp.name) / "opencode.db"
         conn = support.make_db(path)
         support.add_session(conn, "ses_a", "Hello", str(self.workdir))
-        support.add_session(conn, "ses_gone", "Gone", "/no/such/dir")
         conn.close()
-        self.settings = main_mod.Settings(
-            db=path, command="opencode", open_action="session", session_prefix="oc-"
-        )
-        self.session = db.Session(
-            session_id="ses_a", title="Hello", directory=str(self.workdir), time_updated=1
-        )
+        self.settings = _settings(path)
 
-    def _selected(self, pane: Pane | None) -> str:
-        """Render an fzf selection line for this session and pane."""
-        record = render.Record(self.session, pane, now_ms=2_000_000)
-        return render.fzf_line(record, render.layout_for([record]), PALETTE)
-
-    def test_open_pane_jumps(self) -> None:
-        """A line carrying a pane id focuses that pane."""
+    def test_bound_pane_jumps(self) -> None:
+        """A pane id matching a live pane focuses it, no DB open."""
         ok = [Result(("tmux",), 0, "", "")] * 3
-        with mock.patch.object(main_mod, "jump", return_value=ok) as jump:
-            with mock.patch.object(main_mod, "_notify"):
-                code = main_mod._handle_selection(
-                    self._selected(PANE), {"%1": PANE}, self.settings
-                )
-        self.assertEqual(code, 0)
+        with mock.patch.object(main_mod, "list_panes", return_value=[PANE]):
+            with mock.patch.object(main_mod, "jump", return_value=ok) as jump:
+                with mock.patch.object(main_mod, "_notify"):
+                    main_mod._open_selected(
+                        main_mod.PickerResult("ses_a", "%1"), self.settings
+                    )
         jump.assert_called_once_with(PANE)
 
-    def test_jump_failure_is_surfaced(self) -> None:
-        """A failing jump returns non-zero and notifies the user."""
-        bad = [Result(("tmux",), 1, "", "boom")] * 3
-        with mock.patch.object(main_mod, "jump", return_value=bad):
-            with mock.patch.object(main_mod, "_notify") as notify:
-                code = main_mod._handle_selection(
-                    self._selected(PANE), {"%1": PANE}, self.settings
-                )
-        self.assertEqual(code, 1)
-        self.assertIn("jump failed", notify.call_args.args[0])
-
     def test_closed_session_opens(self) -> None:
-        """A line without a pane id opens the session via the configured action."""
+        """No bound pane opens the session with the configured action."""
         ok = Result(("tmux",), 0, "", "")
-        with mock.patch.object(
-            main_mod, "open_session", return_value=("oc-hello", [ok, ok])
-        ) as opener:
-            with mock.patch.object(main_mod, "_notify") as notify:
-                code = main_mod._handle_selection(self._selected(None), {}, self.settings)
-        self.assertEqual(code, 0)
-        self.assertEqual(opener.call_args.args[0].session_id, "ses_a")
-        self.assertIn("opened", notify.call_args.args[0])
-
-    def test_open_failure_is_surfaced(self) -> None:
-        """A failing open run returns non-zero and notifies the user."""
-        bad = Result(("tmux",), 1, "", "no such directory")
-        with mock.patch.object(main_mod, "open_session", return_value=("oc-hello", [bad])):
-            with mock.patch.object(main_mod, "_notify") as notify:
-                code = main_mod._handle_selection(self._selected(None), {}, self.settings)
-        self.assertEqual(code, 1)
-        self.assertIn("open failed", notify.call_args.args[0])
-
-    def test_command_not_found_is_surfaced(self) -> None:
-        """An unresolvable opencode command is reported instead of a dead window."""
-        with mock.patch.object(main_mod, "resolve_command", return_value=None):
-            with mock.patch.object(main_mod, "_notify") as notify:
-                code = main_mod._handle_selection(self._selected(None), {}, self.settings)
-        self.assertEqual(code, 1)
-        self.assertIn("command not found", notify.call_args.args[0])
-
-    def test_missing_directory_is_surfaced(self) -> None:
-        """A session whose directory vanished is reported, not silently dropped."""
-        gone = db.Session(
-            session_id="ses_gone", title="Gone", directory="/no/such/dir", time_updated=1
-        )
-        record = render.Record(gone, None, now_ms=2_000_000)
-        selected = render.fzf_line(record, render.layout_for([record]), PALETTE)
-        with mock.patch.object(main_mod, "open_session") as opener:
-            with mock.patch.object(main_mod, "_notify") as notify:
-                code = main_mod._handle_selection(selected, {}, self.settings)
-        self.assertEqual(code, 1)
-        opener.assert_not_called()
-        self.assertIn("directory no longer exists", notify.call_args.args[0])
-
-    def test_bad_selection_is_surfaced(self) -> None:
-        """A malformed fzf line is logged and reported, not silently dropped."""
-        with mock.patch.object(main_mod, "_notify") as notify:
-            code = main_mod._handle_selection("only\tthree", {}, self.settings)
-        self.assertEqual(code, 1)
-        self.assertIn("unexpected selection", notify.call_args.args[0])
-
-
-class DispatchTest(unittest.TestCase):
-    """Keyboard actions map to the right handler and loop outcome."""
-
-    LINE = "a\tb\tc\td\te\tses_a\t%1"
-
-    def setUp(self) -> None:
-        """Build settings for the dispatcher."""
-        self.settings = main_mod.Settings(
-            db=Path("/tmp/x.db"), command="opencode", open_action="session",
-            session_prefix="oc-",
-        )
-
-    def test_enter_opens_and_exits(self) -> None:
-        """Enter runs the open handler and leaves the loop."""
-        with mock.patch.object(main_mod, "_handle_selection", return_value=0) as handler:
-            outcome = main_mod._dispatch(
-                main_mod.Selection("", [self.LINE]), {"%1": PANE}, self.settings
-            )
-        self.assertEqual(outcome, "exit")
-        handler.assert_called_once()
-
-    def test_enter_failure_refreshes(self) -> None:
-        """A failed open keeps the popup so the user can retry."""
-        with mock.patch.object(main_mod, "_handle_selection", return_value=1):
-            outcome = main_mod._dispatch(
-                main_mod.Selection("", [self.LINE]), {"%1": PANE}, self.settings
-            )
-        self.assertEqual(outcome, "refresh")
-
-    def test_action_keys_dispatch(self) -> None:
-        """ctrl-f / ctrl-d / ctrl-k route to their handlers."""
-        cases = {
-            "ctrl-f": "_open_forked",
-            "ctrl-d": "_delete_selected",
-            "ctrl-k": "_close_selected",
-        }
-        for key, handler_name in cases.items():
-            with self.subTest(key=key):
-                with mock.patch.object(
-                    main_mod, handler_name, return_value="refresh"
-                ) as handler:
-                    outcome = main_mod._dispatch(
-                        main_mod.Selection(key, [self.LINE]), {"%1": PANE}, self.settings
+        with mock.patch.object(main_mod, "list_panes", return_value=[]):
+            with mock.patch.object(
+                main_mod, "open_session", return_value=("oc-hello", [ok])
+            ) as opener:
+                with mock.patch.object(main_mod, "_notify"):
+                    main_mod._open_selected(
+                        main_mod.PickerResult("ses_a", ""), self.settings
                     )
-                self.assertEqual(outcome, "refresh")
-                handler.assert_called_once()
+        self.assertEqual(opener.call_args.args[0].session_id, "ses_a")
+
+    def test_empty_selection_does_nothing(self) -> None:
+        """An empty result is a no-op (cancel path)."""
+        with mock.patch.object(main_mod, "list_panes") as panes:
+            main_mod._open_selected(main_mod.PickerResult(), self.settings)
+        panes.assert_not_called()
 
 
-class ConfirmTest(unittest.TestCase):
-    """The confirmation screen returns Enter=yes, Esc=no."""
-
-    def _confirm(self, returncode: int):  # noqa: ANN202 - test helper
-        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
-            return Result(tuple(argv), returncode, "", "")
-
-        with mock.patch.object(main_mod.subprocess, "run", fake_run):
-            return main_mod._confirm("sure?", ["line"])
-
-    def test_enter_confirms(self) -> None:
-        """A zero exit code means the user confirmed."""
-        self.assertTrue(self._confirm(0))
-
-    def test_escape_cancels(self) -> None:
-        """A non-zero exit code means the user cancelled."""
-        self.assertFalse(self._confirm(130))
-
-    def test_ansi_is_stripped(self) -> None:
-        """Colored selection lines are shown plain on the confirmation screen."""
-        captured = {}
-
-        def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - test seam
-            captured["input"] = kwargs.get("input")
-            return Result(tuple(argv), 0, "", "")
-
-        with mock.patch.object(main_mod.subprocess, "run", fake_run):
-            main_mod._confirm("sure?", ["\x1b[32mline\x1b[0m"])
-        self.assertNotIn("\x1b[", captured["input"])
-
-
-class ActionHandlersTest(unittest.TestCase):
-    """The ctrl-* handlers resolve targets, confirm, and delegate correctly."""
+class ActionContractTest(unittest.TestCase):
+    """The fzf callbacks resolve targets and delegate correctly."""
 
     def setUp(self) -> None:
         """Create a store and settings, and redirect the diagnostic log."""
@@ -408,61 +336,60 @@ class ActionHandlersTest(unittest.TestCase):
         conn = support.make_db(path)
         support.add_session(conn, "ses_a", "Hello", str(self.workdir))
         conn.close()
-        self.settings = main_mod.Settings(
-            db=path, command="opencode", open_action="session", session_prefix="oc-"
-        )
-        session = db.Session("ses_a", "Hello", str(self.workdir), 1)
-        record = render.Record(session, PANE, now_ms=2_000_000)
-        self.line = render.fzf_line(record, render.layout_for([record]), PALETTE)
+        self.settings = _settings(path)
 
-    def test_delete_confirmed_delegates_to_opencode(self) -> None:
-        """Confirmation runs ``delete_sessions`` with the resolved command + ids."""
+    def test_delete_delegates_to_opencode(self) -> None:
+        """Delete runs ``delete_sessions`` with the resolved command + ids."""
         ok = [Result(("opencode",), 0, "", "")]
-        with mock.patch.object(main_mod, "_confirm", return_value=True):
-            with mock.patch.object(
-                main_mod, "resolve_command", return_value="/usr/bin/opencode"
-            ):
-                with mock.patch.object(main_mod, "delete_sessions", return_value=ok) as dele:
-                    with mock.patch.object(main_mod, "_notify"):
-                        outcome = main_mod._delete_selected(
-                            main_mod.Selection("ctrl-d", [self.line]), self.settings
-                        )
-        self.assertEqual(outcome, "refresh")
+        with mock.patch.object(
+            main_mod, "resolve_command", return_value="/usr/bin/opencode"
+        ):
+            with mock.patch.object(main_mod, "delete_sessions", return_value=ok) as dele:
+                with mock.patch.object(main_mod, "_notify"):
+                    main_mod._action_delete(["ses_a", "ses_b"], self.settings)
         self.assertEqual(dele.call_args.args[0], "/usr/bin/opencode")
-        self.assertEqual(dele.call_args.args[1], ["ses_a"])
+        self.assertEqual(dele.call_args.args[1], ["ses_a", "ses_b"])
 
-    def test_delete_cancelled_does_nothing(self) -> None:
-        """A cancelled confirmation never deletes."""
-        with mock.patch.object(main_mod, "_confirm", return_value=False):
-            with mock.patch.object(main_mod, "delete_sessions") as dele:
-                outcome = main_mod._delete_selected(
-                    main_mod.Selection("ctrl-d", [self.line]), self.settings
-                )
-        self.assertEqual(outcome, "refresh")
-        dele.assert_not_called()
+    def test_cli_accepts_multiple_session_ids(self) -> None:
+        """``--session a b`` (fzf's ``{+6}``) reaches the action as two ids."""
+        ok = [Result(("opencode",), 0, "", "")]
+        with mock.patch.object(
+            main_mod, "resolve_command", return_value="/usr/bin/opencode"
+        ):
+            with mock.patch.object(main_mod, "delete_sessions", return_value=ok) as dele:
+                with mock.patch.object(main_mod, "_notify"):
+                    code = main_mod.main(
+                        [
+                            "--no-state",
+                            "--db",
+                            str(self.settings.db),
+                            "--action",
+                            "delete",
+                            "--session",
+                            "ses_a",
+                            "ses_b",
+                        ]
+                    )
+        self.assertEqual(code, 0)
+        self.assertEqual(dele.call_args.args[1], ["ses_a", "ses_b"])
 
-    def test_close_confirmed_targets_the_pane_session(self) -> None:
+    def test_close_targets_the_pane_session(self) -> None:
         """A bound session is closed via its hosting tmux session name."""
         ok = [Result(("tmux",), 0, "", "")]
-        with mock.patch.object(main_mod, "_confirm", return_value=True):
-            with mock.patch.object(main_mod, "close_sessions", return_value=ok) as closer:
-                with mock.patch.object(main_mod, "_notify"):
-                    outcome = main_mod._close_selected(
-                        main_mod.Selection("ctrl-k", [self.line]), {"%1": PANE}, self.settings
-                    )
-        self.assertEqual(outcome, "refresh")
+        with mock.patch.object(main_mod, "_records", return_value=([], {"%1": PANE})):
+            with mock.patch.object(main_mod, "_sessions_by_id", return_value={}):
+                with mock.patch.object(main_mod, "close_sessions", return_value=ok) as closer:
+                    with mock.patch.object(main_mod, "_notify"):
+                        main_mod._action_close(["ses_a"], self.settings)
         self.assertEqual(closer.call_args.args[0], [PANE.session_name])
 
-    def test_fork_opens_a_fork_and_exits(self) -> None:
-        """``ctrl-f`` opens a forked session and leaves the loop."""
+    def test_fork_opens_a_fork(self) -> None:
+        """Fork opens a forked session in a new tmux session."""
         ok = Result(("tmux",), 0, "", "")
         with mock.patch.object(main_mod, "resolve_command", return_value="/usr/bin/opencode"):
             with mock.patch.object(
                 main_mod, "open_session", return_value=("oc-hello", [ok])
             ) as opener:
                 with mock.patch.object(main_mod, "_notify"):
-                    outcome = main_mod._open_forked(
-                        main_mod.Selection("ctrl-f", [self.line]), self.settings
-                    )
-        self.assertEqual(outcome, "exit")
+                    main_mod._action_fork(["ses_a"], self.settings)
         self.assertTrue(opener.call_args.kwargs.get("fork"))

@@ -78,14 +78,19 @@ label or age), and `--sort attention` hoists the sessions that need you —
 | -------- | ---------------------------------------------------------------------- |
 | `Enter`  | jump to the pane displaying the session, or open it                    |
 | `ctrl-f` | **fork** the session into a new one (new tmux session)                 |
-| `ctrl-d` | **delete** the selected session(s) — confirmed, delegated to `opencode session delete` |
-| `ctrl-k` | **close** the selected session's tmux session(s) — confirmed           |
+| `ctrl-d` | **delete** the selected session(s) — `ctrl-y` to confirm, runs `opencode session delete` |
+| `ctrl-k` | **close** the selected session's tmux session(s) — `ctrl-y` to confirm |
+| `ctrl-y` | confirm a pending `ctrl-d` / `ctrl-k`                                  |
 | `Tab`    | mark several rows for `ctrl-d` / `ctrl-k`                              |
-| `Esc`    | quit                                                                   |
+| `Esc`    | quit (also cancels a pending confirmation)                             |
 
-Destructive actions (`ctrl-d`/`ctrl-k`) ask for confirmation on a second fzf
-screen and refresh the list in place — the popup stays open. Deleting never
-touches the database directly: it runs `opencode session delete`.
+Destructive actions (`ctrl-d`/`ctrl-k`) do not fire on the first press: the
+picker paints a confirmation in its **footer** and waits for `ctrl-y` (`Esc`
+cancels). The selection stays visible while you confirm — a refresh would clear
+fzf's marks, so the arm step deliberately does not refresh. Pressing `ctrl-y`
+runs the action and refreshes the list in place; a single long-lived `fzf`
+serves the whole picker, so the popup is never blanked between actions. Deleting
+never touches the database directly: it runs `opencode session delete`.
 
 The same shortcuts are printed at the bottom of the picker, under the column
 legend. Deleting several sessions runs the `opencode` processes in a small
