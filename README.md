@@ -55,6 +55,24 @@ Any free prefix key works; `bind -n M-o ...` gives a prefix-less trigger.
 
 Restart OpenCode so the plugin loads (plugins are read at startup).
 
+## Uninstall
+
+```sh
+./uninstall.sh
+```
+
+`uninstall.sh` removes exactly what the installer created: the
+`~/.local/bin/ocjump` shim and the `oc-state.js` plugin symlink (a real file
+placed there by hand is left alone). Your `~/.config/ocjump/config.ini` and the
+checkout itself are untouched. Then drop the `bind j …` line from
+`~/.tmux.conf`, reload tmux (`prefix` + `r`) and restart OpenCode.
+
+In short, the manual equivalent is just:
+
+```sh
+rm -f ~/.local/bin/ocjump ~/.config/opencode/plugins/oc-state.js
+```
+
 ## Usage
 
 ```sh
