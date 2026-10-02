@@ -49,7 +49,11 @@ KEY_HELP = (
     " · Esc quit"
 )
 PREVIEW_LABEL = " preview "
-NOTIFY_MS = "5000"
+# A tmux status message overlays the popup and defers its repaint until the
+# message clears, so this delay caps how long the list stays frozen after an
+# action; keep it short.  "deleted N…" is shown once the refresh has happened,
+# so the message and the visible change coincide.
+NOTIFY_MS = "1000"
 
 
 @dataclass(frozen=True)

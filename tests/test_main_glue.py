@@ -140,6 +140,11 @@ class PickTest(unittest.TestCase):
         self.assertIn("$(cat ", confirm)
         self.assertIn("rm -f ", confirm)
         self.assertIn("--action close", confirm)
+        # The outcome is notified only after the reload (message == refresh).
+        self.assertIn("--result-file", confirm)
+        self.assertIn("+reload-sync(", confirm)
+        self.assertIn("tmux display-message", confirm)
+        self.assertLess(confirm.index("+reload-sync("), confirm.index("tmux display-message"))
 
     def test_pick_returns_empty_on_abort(self) -> None:
         """A non-zero fzf exit yields an empty result (cancel)."""
@@ -246,6 +251,7 @@ class BindingsTest(unittest.TestCase):
         self.assertIn(str(state / "pending-close"), joined)
         self.assertIn(str(state / "msg-delete"), joined)
         self.assertIn(str(state / "msg-close"), joined)
+        self.assertIn(str(state / "result"), joined)
 
 
 class NotifyTest(unittest.TestCase):
@@ -372,6 +378,46 @@ class ActionContractTest(unittest.TestCase):
                     )
         self.assertEqual(code, 0)
         self.assertEqual(dele.call_args.args[1], ["ses_a", "ses_b"])
+
+    def test_delete_defers_the_message_to_the_result_file(self) -> None:
+        """With ``--result-file`` the outcome is queued, not notified inline."""
+        result = Path(self.tmp.name) / "result"
+        ok = [Result(("opencode",), 0, "", "")]
+        with mock.patch.object(
+            main_mod, "resolve_command", return_value="/usr/bin/opencode"
+        ):
+            with mock.patch.object(main_mod, "delete_sessions", return_value=ok):
+                with mock.patch.object(main_mod, "_notify") as notify:
+                    main_mod._action_delete(["ses_a"], self.settings, str(result))
+        self.assertEqual(result.read_text(encoding="utf-8"), "ocjump: deleted 1 session(s)")
+        # "deleting…" is still immediate; the final message is deferred.
+        self.assertEqual(notify.call_count, 1)
+        self.assertIn("deleting", notify.call_args.args[0])
+
+    def test_cli_accepts_result_file(self) -> None:
+        """``--result-file`` is parsed and receives the outcome."""
+        result = Path(self.tmp.name) / "result"
+        ok = [Result(("opencode",), 0, "", "")]
+        with mock.patch.object(
+            main_mod, "resolve_command", return_value="/usr/bin/opencode"
+        ):
+            with mock.patch.object(main_mod, "delete_sessions", return_value=ok):
+                with mock.patch.object(main_mod, "_notify"):
+                    code = main_mod.main(
+                        [
+                            "--no-state",
+                            "--db",
+                            str(self.settings.db),
+                            "--action",
+                            "delete",
+                            "--session",
+                            "ses_a",
+                            "--result-file",
+                            str(result),
+                        ]
+                    )
+        self.assertEqual(code, 0)
+        self.assertIn("deleted 1 session(s)", result.read_text(encoding="utf-8"))
 
     def test_close_targets_the_pane_session(self) -> None:
         """A bound session is closed via its hosting tmux session name."""
