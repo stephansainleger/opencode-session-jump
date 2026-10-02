@@ -99,20 +99,13 @@ runtimes rather than one per session.
 
 ### Example
 
-Columns are fixed-width and the state glyph is colored in a real terminal
-(fictional data below):
+![ocjump picker, with the delete confirmation in the footer](docs/ocjump.gif)
 
-```text
-●  working    2m   ~/code/api     Add pagination to the /users endpoint
-?  wait:ask   5m   ~/code/blog    Which database should I use?
-⏸  wait:perm  8m   ~/code/infra   Permission to run docker compose up?
-✓  done       1h   ~/code/docs    Fix the broken anchor links
-·  unknown    2d   ~/code/legacy  Migrate the old config loader
-   state      age  directory      title
-```
+*The real picker (opencode theme, 24-bit color) over fictional sessions, filtering
+and arming a delete confirmation. Regenerate the demo with
+`python3 tools/render-demo.py` (needs `asciinema` and `agg`).*
 
 The preview pane (right) shows the session metadata and its last messages.
-
 Columns are `state · age · directory · title`. Label, age and directory are
 padded to fixed widths so every title starts at the same column; the (short)
 directory precedes the (often long) title so it always stays visible. A
@@ -255,6 +248,21 @@ The suite mixes unit tests with real integration tests: a throwaway tmux
 server (isolated socket) exercises `list-panes` parsing, session creation and
 pane focusing, and a fake `tmux` shim exercises the node plugin's writing
 path. No running OpenCode instance is required.
+
+### Demo assets
+
+`docs/ocjump.gif` and `docs/ocjump.png` are generated from the real binary by
+`tools/render-demo.py`, which builds a throwaway store full of fictional
+sessions, tags fake OpenCode panes with every state, records the picker with
+[`asciinema`](https://asciinema.org) inside an isolated tmux server, and renders
+the cast with [`agg`](https://github.com/asciinema/agg). Both tools must be on
+`PATH`:
+
+```sh
+pipx install asciinema          # or: sudo apt install asciinema
+cargo install --git https://github.com/asciinema/agg
+python3 tools/render-demo.py    # rewrites docs/ocjump.gif and docs/ocjump.png
+```
 
 ## License
 
