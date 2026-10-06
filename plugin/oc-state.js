@@ -10,10 +10,29 @@ const STATE_WAITING_QUESTION = "waiting-question"
 const STATE_DONE = "done"
 const STATE_ERROR = "error"
 
+// Events that mean "the session is blocked on the user".  While one is active,
+// message/session churn (which would map to ``working``) must not overwrite it:
+// OpenCode emits a ``message.part.updated`` a few milliseconds after
+// ``permission.asked``, and that would otherwise flip the pane back to working.
+const WAITING_STATES = {
+  "permission.asked": STATE_WAITING_PERMISSION,
+  "question.asked": STATE_WAITING_QUESTION,
+}
+
+// Events that mean "the user answered / dismissed the prompt": the turn resumes.
+const CLEARING_EVENTS = new Set([
+  "permission.replied",
+  "question.replied",
+  "question.rejected",
+])
+
+// Terminal events win over any pending wait and clear it.
+const TERMINAL_EVENTS = new Set(["session.idle", "session.error"])
+
 const TMUX_PANE = process.env.TMUX_PANE
 
 /**
- * Map an OpenCode event to the live state it implies.
+ * Map a single OpenCode event to the live state it implies.
  *
  * @param {{type?: string}} event - Raw OpenCode event object.
  * @returns {string|null} One of the STATE_* values, or null when the event
@@ -24,6 +43,9 @@ export const stateForEvent = (event) => {
     case "session.created":
     case "message.updated":
     case "message.part.updated":
+    case "permission.replied":
+    case "question.replied":
+    case "question.rejected":
       return STATE_WORKING
     case "permission.asked":
       return STATE_WAITING_PERMISSION
@@ -36,6 +58,33 @@ export const stateForEvent = (event) => {
     default:
       return null
   }
+}
+
+/**
+ * Compute the next state from the current wait lock and an event.
+ *
+ * @param {string|null} waiting - The active wait (a STATE_* value) or null.
+ * @param {{type?: string}} event - Raw OpenCode event object.
+ * @returns {{waiting: string|null, state: string|null}} The new wait lock and
+ *   the state to publish (``null`` means "leave the pane unchanged"). Pure, so
+ *   the blocking behaviour is testable without tmux.
+ */
+export const nextState = (waiting, event) => {
+  const type = event?.type
+  if (type in WAITING_STATES) {
+    return { waiting: WAITING_STATES[type], state: WAITING_STATES[type] }
+  }
+  if (CLEARING_EVENTS.has(type)) {
+    return { waiting: null, state: STATE_WORKING }
+  }
+  if (TERMINAL_EVENTS.has(type)) {
+    return { waiting: null, state: stateForEvent(event) }
+  }
+  if (waiting) {
+    // Blocked on the user: ignore message/session churn until it is answered.
+    return { waiting, state: null }
+  }
+  return { waiting: null, state: stateForEvent(event) }
 }
 
 const setOption = (name, value) => {
@@ -66,13 +115,15 @@ const sessionIdOf = (event) =>
  */
 export const OcStatePlugin = async () => {
   let currentSessionID = null
+  let waiting = null
   return {
     event: async ({ event }) => {
       const sid = sessionIdOf(event)
       if (sid) currentSessionID = sid
-      const state = stateForEvent(event)
-      if (!state) return
-      setOption(STATE_OPTION, state)
+      const decision = nextState(waiting, event)
+      waiting = decision.waiting
+      if (!decision.state) return
+      setOption(STATE_OPTION, decision.state)
       setOption(SESSION_OPTION, sid || currentSessionID)
       setOption(STATE_AT_OPTION, Math.floor(Date.now() / 1000))
     },
