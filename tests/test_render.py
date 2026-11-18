@@ -233,6 +233,40 @@ class SortRecordsTest(unittest.TestCase):
         self.assertEqual(ordered, [9, 1])
 
 
+class ArchivedRenderingTest(unittest.TestCase):
+    """Archived sessions are marked in human views but keep their raw title."""
+
+    def _archived(self) -> render.Record:
+        session = db.Session(
+            session_id="ses_arch",
+            title="Old",
+            directory="/p",
+            time_updated=NOW_MS,
+            archived=True,
+        )
+        return render.Record(session, None, now_ms=NOW_MS)
+
+    def test_visible_views_add_the_marker(self) -> None:
+        """fzf, NUL and the human table carry ``(arch)`` in the title field."""
+        record = self._archived()
+        line = render.fzf_line(record, render.layout_for([record]), PALETTE)
+        self.assertEqual(line.split(render.FIELD_SEP)[4], "Old (arch)")
+        self.assertIn("Old (arch)", render.nul_record(record))
+        self.assertIn("Old (arch)", render.human_table([record], PALETTE))
+
+    def test_json_keeps_the_raw_title_and_a_flag(self) -> None:
+        """NDJSON exposes the untouched title next to ``archived: true``."""
+        payload = json.loads(render.json_record(self._archived()))
+        self.assertEqual(payload["title"], "Old")
+        self.assertTrue(payload["archived"])
+
+    def test_live_session_is_not_archived(self) -> None:
+        """A normal session has no marker and ``archived`` is false."""
+        record = _record()
+        self.assertEqual(render.display_title(record.session), "Hello")
+        self.assertFalse(json.loads(render.json_record(record))["archived"])
+
+
 class StatusLineTest(unittest.TestCase):
     """The compact status segment counts live states and omits empty buckets."""
 

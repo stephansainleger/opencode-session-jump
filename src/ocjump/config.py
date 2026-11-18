@@ -11,6 +11,7 @@ The format is INI so it needs no third-party parser and stays easy to edit::
     theme = opencode      ; opencode | ansi
     sort = recent         ; recent | attention
     search = text         ; text (title+directory) | all
+    archived = false      ; include archived sessions in the picker
     status_colors = always ; always | never (for `--status`)
     # db = /path/to/opencode.db
 """
@@ -36,6 +37,7 @@ DEFAULT_SESSION_PREFIX = "oc-"
 DEFAULT_THEME = "opencode"
 DEFAULT_SORT = "recent"
 DEFAULT_SEARCH = "text"
+DEFAULT_ARCHIVED = False
 DEFAULT_STATUS_COLORS = "always"
 
 
@@ -53,6 +55,7 @@ class Config:
     theme: str = DEFAULT_THEME
     sort: str = DEFAULT_SORT
     search: str = DEFAULT_SEARCH
+    archived: bool = DEFAULT_ARCHIVED
     status_colors: str = DEFAULT_STATUS_COLORS
     db: str | None = None
 
@@ -97,6 +100,18 @@ def load(path: Path | None = None) -> Config:
             )
         return chosen
 
+    def boolean(key: str, default: bool) -> bool:
+        if not parser.has_option("ocjump", key):
+            return default
+        text = parser.get("ocjump", key, raw=True).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        raise ConfigError(
+            f"invalid '{key}' = {text!r} in {resolved}; expected true or false"
+        )
+
     return Config(
         open_action=choice("open", DEFAULT_OPEN_ACTION, OPEN_ACTIONS),
         command=value("command", DEFAULT_COMMAND) or DEFAULT_COMMAND,
@@ -105,6 +120,7 @@ def load(path: Path | None = None) -> Config:
         theme=value("theme", DEFAULT_THEME) or DEFAULT_THEME,
         sort=choice("sort", DEFAULT_SORT, SORT_MODES),
         search=choice("search", DEFAULT_SEARCH, SEARCH_SCOPES),
+        archived=boolean("archived", DEFAULT_ARCHIVED),
         status_colors=choice("status_colors", DEFAULT_STATUS_COLORS, STATUS_COLOR_MODES),
         db=value("db", None),
     )

@@ -69,6 +69,7 @@ class Settings:
     sort: str = config.DEFAULT_SORT
     search: str = config.DEFAULT_SEARCH
     no_state: bool = False
+    archived: bool = config.DEFAULT_ARCHIVED
     status_colors: str = config.DEFAULT_STATUS_COLORS
     max_sessions: int = 0
 
@@ -123,6 +124,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--all", action="store_true", help="Include sub-agent sessions")
     parser.add_argument(
         "--no-state", action="store_true", help="Skip tmux probing (offline / tests)"
+    )
+    parser.add_argument(
+        "--archived",
+        action="store_true",
+        help="Include archived sessions (default: hidden)",
     )
     parser.add_argument(
         "--max-sessions",
@@ -184,6 +190,7 @@ def _records(
         sessions = db.list_sessions(
             conn,
             include_children=include_children,
+            include_archived=settings.archived,
             limit=settings.max_sessions,
         )
         list_ms = (time.perf_counter() - list_start) * 1000
@@ -271,11 +278,14 @@ def _common_args(settings: Settings) -> str:
     """Shell flags reproducing the effective settings for a callback run.
 
     Only flags that change the visible row set or its state matter: the DB,
-    ``--no-state``, a non-default ``--command`` and a session cap.
+    ``--no-state``, a non-default ``--command``, ``--archived`` and a session
+    cap.  Omitting ``--archived`` would make a fzf reload silently drop rows.
     """
     parts = ["--db", shlex.quote(str(settings.db))]
     if settings.no_state:
         parts.append("--no-state")
+    if settings.archived:
+        parts.append("--archived")
     if settings.max_sessions:
         parts += ["--max-sessions", str(settings.max_sessions)]
     if settings.command != config.DEFAULT_COMMAND:
@@ -525,7 +535,8 @@ def _sessions_by_id(settings: Settings) -> dict[str, db.Session]:
     """Return selectable sessions keyed by id (for close target derivation)."""
     try:
         with db.connect(settings.db) as conn:
-            return {session.session_id: session for session in db.list_sessions(conn)}
+            sessions = db.list_sessions(conn, include_archived=settings.archived)
+            return {session.session_id: session for session in sessions}
     except (FileNotFoundError, OSError, db.SchemaError):
         return {}
 
@@ -646,6 +657,7 @@ def _load_settings(args: argparse.Namespace) -> Settings:
         sort=args.sort or cfg.sort,
         search=cfg.search,
         no_state=args.no_state,
+        archived=args.archived or cfg.archived,
         status_colors=args.status_colors or cfg.status_colors,
         max_sessions=args.max_sessions,
     )

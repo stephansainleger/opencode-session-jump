@@ -31,6 +31,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.theme, config.DEFAULT_THEME)
         self.assertEqual(cfg.sort, config.DEFAULT_SORT)
         self.assertEqual(cfg.search, config.DEFAULT_SEARCH)
+        self.assertFalse(cfg.archived)
         self.assertEqual(cfg.status_colors, config.DEFAULT_STATUS_COLORS)
         self.assertIsNone(cfg.db)
 
@@ -44,6 +45,7 @@ class ConfigTest(unittest.TestCase):
             "theme = ansi\n"
             "sort = attention\n"
             "search = all\n"
+            "archived = true\n"
             "status_colors = never\n"
             "db = /tmp/x.db\n"
         )
@@ -54,6 +56,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.theme, "ansi")
         self.assertEqual(cfg.sort, "attention")
         self.assertEqual(cfg.search, "all")
+        self.assertTrue(cfg.archived)
         self.assertEqual(cfg.status_colors, "never")
         self.assertEqual(cfg.db, "/tmp/x.db")
 
@@ -64,6 +67,12 @@ class ConfigTest(unittest.TestCase):
                 self._write(f"[ocjump]\n{key} = nope\n")
                 with self.assertRaises(config.ConfigError):
                     config.load(self.path)
+
+    def test_invalid_archived_raises(self) -> None:
+        """A non-boolean ``archived`` value is rejected, not silently false."""
+        self._write("[ocjump]\narchived = maybe\n")
+        with self.assertRaises(config.ConfigError):
+            config.load(self.path)
 
     def test_malformed_file_raises(self) -> None:
         """A file without a section header is rejected."""

@@ -51,6 +51,7 @@ class Session:
     time_updated: int
     agent: str | None = None
     model: str | None = None
+    archived: bool = False
 
 
 def _env_flag(name: str) -> bool:
@@ -166,22 +167,27 @@ def connect(path: Path) -> sqlite3.Connection:
 def list_sessions(
     conn: sqlite3.Connection,
     include_children: bool = False,
+    include_archived: bool = False,
     limit: int = 0,
 ) -> list[Session]:
     """Return persisted sessions, most recently updated first.
 
     Sub-agent sessions (non-null ``parent_id``) are hidden unless
-    ``include_children`` is true.  ``limit`` caps the rows when positive, so a
+    ``include_children`` is true; archived sessions are hidden unless
+    ``include_archived`` is true.  ``limit`` caps the rows when positive, so a
     frequent caller (for example ``--status``) can bound its cost.
     """
-    where = ["time_archived IS NULL"]
+    where = []
+    if not include_archived:
+        where.append("time_archived IS NULL")
     if not include_children:
         where.append("parent_id IS NULL")
     query = (
-        "SELECT id, title, directory, time_updated, agent, model "
+        "SELECT id, title, directory, time_updated, time_archived, agent, model "
         "FROM session"
     )
-    query += f" WHERE {' AND '.join(where)}"
+    if where:
+        query += f" WHERE {' AND '.join(where)}"
     query += " ORDER BY time_updated DESC"
     if limit > 0:
         query += f" LIMIT {int(limit)}"
@@ -193,6 +199,7 @@ def list_sessions(
             time_updated=row["time_updated"],
             agent=row["agent"],
             model=row["model"],
+            archived=bool(row["time_archived"]),
         )
         for row in conn.execute(query)
     ]
@@ -205,7 +212,8 @@ def get_session(conn: sqlite3.Connection, session_id: str) -> Session:
         KeyError: no such session exists.
     """
     row = conn.execute(
-        "SELECT id, title, directory, time_updated, agent, model FROM session WHERE id=?",
+        "SELECT id, title, directory, time_updated, time_archived, agent, model "
+        "FROM session WHERE id=?",
         (session_id,),
     ).fetchone()
     if row is None:
@@ -217,6 +225,7 @@ def get_session(conn: sqlite3.Connection, session_id: str) -> Session:
         time_updated=row["time_updated"],
         agent=row["agent"],
         model=row["model"],
+        archived=bool(row["time_archived"]),
     )
 
 

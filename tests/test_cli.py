@@ -187,17 +187,62 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, 2)
 
 
+class ArchivedListingTest(unittest.TestCase):
+    """``--archived`` makes archived rows visible and marks their titles."""
+
+    def setUp(self) -> None:
+        """Create a store with one live and one archived session."""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name) / "state"
+        patcher = mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.state)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.db_path = Path(self.tmp.name) / "opencode.db"
+        conn = support.make_db(self.db_path)
+        support.add_session(conn, "ses_a", "Alpha", "/p", time_updated=20)
+        support.add_session(conn, "ses_arch", "Old", "/p", time_updated=10, time_archived=5)
+        conn.close()
+
+    def _run(self, argv: list[str]) -> tuple[int, str]:
+        """Run ``main`` and capture stdout."""
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = main(["--no-state", "--db", str(self.db_path)] + argv)
+        return code, buffer.getvalue()
+
+    def test_hidden_by_default(self) -> None:
+        """Archived sessions stay out of the listing without the flag."""
+        _, out = self._run(["--list"])
+        self.assertNotIn("Old", out)
+
+    def test_archived_rows_are_marked(self) -> None:
+        """The flag reveals them and appends the marker to the title."""
+        _, out = self._run(["--list", "--archived"])
+        self.assertIn("Old (arch)", out)
+
+    def test_json_exposes_the_flag(self) -> None:
+        """NDJSON keeps the raw title and reports archived=true."""
+        _, out = self._run(["--list", "--archived", "--json"])
+        rows = [json.loads(line) for line in out.splitlines()]
+        archived = next(row for row in rows if row["session_id"] == "ses_arch")
+        self.assertEqual(archived["title"], "Old")
+        self.assertTrue(archived["archived"])
+
+
 class CommonArgsTest(unittest.TestCase):
     """Callbacks must reproduce the visible row set after a refresh."""
 
-    def test_session_cap_is_forwarded(self) -> None:
-        """The reload command keeps the session cap."""
+    def test_archived_and_limit_are_forwarded(self) -> None:
+        """The reload command keeps archived rows and the session cap."""
         settings = main_mod.Settings(
             db=Path("/tmp/x.db"),
             command="opencode",
             open_action="session",
             session_prefix="oc-",
+            archived=True,
             max_sessions=5,
         )
         args = main_mod._common_args(settings)
+        self.assertIn("--archived", args)
         self.assertIn("--max-sessions 5", args)

@@ -30,6 +30,7 @@ from .theme import Palette
 FIELD_SEP = "\t"
 FZF_VISIBLE_FIELDS = "1,2,3,4,5"
 ANSI_RESET = "\x1b[0m"
+ARCHIVED_SUFFIX = " (arch)"
 STATUS_STATES = (
     WORKING,
     WAITING_PERMISSION,
@@ -165,6 +166,15 @@ def format_age(now_ms: int, then_ms: int) -> str:
     return f"{days // 365}y"
 
 
+def display_title(session: Session) -> str:
+    """Return the title with an archived marker when the session is archived.
+
+    The raw title stays untouched in :class:`Session` because pane matching and
+    the OpenCode store use it verbatim; only human-facing views add the suffix.
+    """
+    return f"{session.title}{ARCHIVED_SUFFIX}" if session.archived else session.title
+
+
 def abbreviate_dir(path: str, home: str | None = None) -> str:
     """Replace a leading home directory with ``~`` for compact display."""
     home = home if home is not None else os.path.expanduser("~")
@@ -192,7 +202,7 @@ def _plain_fields(record: Record) -> list[str]:
         state_style.label,
         format_age(record.now_ms, record.session.time_updated),
         abbreviate_dir(record.session.directory),
-        record.session.title,
+        display_title(record.session),
         record.session.session_id,
         record.pane_id,
     ]
@@ -220,7 +230,7 @@ def fzf_line(
         state_style.label.ljust(layout.label),
         format_age(record.now_ms, record.session.time_updated).ljust(layout.age),
         directory.ljust(layout.directory),
-        record.session.title,
+        display_title(record.session),
         record.session.session_id,
         record.pane_id,
     ]
@@ -257,6 +267,7 @@ def json_record(record: Record) -> str:
         "pane_id": record.pane_id,
         "title": record.session.title,
         "directory": record.session.directory,
+        "archived": record.session.archived,
     }
     return json.dumps(payload, ensure_ascii=False)
 
@@ -274,7 +285,7 @@ def human_table(records: list[Record], palette: Palette, color: bool = False) ->
             cell_state(record),
             format_age(record.now_ms, record.session.time_updated),
             abbreviate_dir(record.session.directory),
-            record.session.title,
+            display_title(record.session),
         ]
         for record in records
     ]

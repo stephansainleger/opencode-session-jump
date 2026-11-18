@@ -86,6 +86,7 @@ ocjump --no-state      # skip tmux probing (offline / tests)
 ocjump --open split    # action for a closed session: session | window | split
 ocjump --sort attention     # order: recent (default) | attention
 ocjump --command opencode   # executable used to open a session
+ocjump --archived           # include archived sessions (marked "(arch)")
 ocjump --max-sessions 50    # cap the rows read from the store
 ocjump --status             # one-line segment for a tmux status bar
 ocjump --status-colors never  # plain text segment (always | never)
@@ -189,11 +190,14 @@ are ordered timestamp first, then the common keys:
 | `state`     | string            | live state (see above), empty if unbound |
 | `state_at`  | UTC float or null | when the state was last published        |
 | `pane_id`   | string            | tmux pane id (`%NN`), empty if unbound   |
-| `title`     | string            | session title                            |
+| `title`     | string            | session title (raw, no archive marker)   |
 | `directory` | string            | session working directory                |
+| `archived`  | bool              | session is archived                      |
 
 The `-0` records are the seven display fields separated by tabs:
 `glyph, label, age, directory, title, session_id, pane_id` (never colored).
+Archived rows keep the marker in that visible title field.
+
 ## Configuration
 
 Optional, under `~/.config/ocjump/config.ini` (override the path with
@@ -207,6 +211,7 @@ session_prefix = oc-
 theme = opencode      ; opencode | ansi
 sort = recent         ; recent | attention
 search = text         ; text (directory+title) | all
+archived = false      ; include archived sessions
 status_colors = always ; always | never (for --status)
 # db = /path/to/opencode.db
 ```
@@ -219,6 +224,7 @@ status_colors = always ; always | never (for --status)
 | `theme`          | `opencode` | color palette (`opencode` or `ansi`)     |
 | `sort`           | `recent`   | order (`recent` or `attention`)          |
 | `search`         | `text`     | filter scope (`text` = dir+title, `all`) |
+| `archived`       | `false`    | include archived sessions                |
 | `status_colors`  | `always`   | tmux colors in `--status` (`always`/`never`) |
 | `db`             | *(auto)*   | override the OpenCode store path         |
 

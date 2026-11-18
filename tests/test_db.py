@@ -141,6 +141,23 @@ class ListSessionsTest(unittest.TestCase):
         self.assertIn("Child", titles)
         self.assertNotIn("Gone", titles)
 
+    def test_include_archived_reveals_and_flags_rows(self) -> None:
+        """include_archived adds archived rows while leaving children hidden."""
+        sessions = db.list_sessions(self.conn, include_archived=True)
+        gone = next(session for session in sessions if session.session_id == "ses_gone")
+        self.assertTrue(gone.archived)
+        self.assertEqual([s.title for s in sessions], ["Gone", "Beta", "Alpha"])
+        self.assertFalse(any(session.session_id == "ses_child" for session in sessions))
+
+    def test_limit_caps_the_rows(self) -> None:
+        """A positive limit keeps the newest rows only."""
+        titles = [s.title for s in db.list_sessions(self.conn, limit=1)]
+        self.assertEqual(titles, ["Beta"])
+
+    def test_zero_limit_means_no_cap(self) -> None:
+        """The default ``limit=0`` returns every visible session."""
+        self.assertEqual(len(db.list_sessions(self.conn, limit=0)), 2)
+
 
 class GetSessionTest(unittest.TestCase):
     """Fetching by id success and failure paths."""
@@ -160,6 +177,11 @@ class GetSessionTest(unittest.TestCase):
         """An unknown id raises KeyError."""
         with self.assertRaises(KeyError):
             db.get_session(self.conn, "ses_nope")
+
+    def test_archived_flag_is_exposed(self) -> None:
+        """Fetching an archived session reports the flag."""
+        support.add_session(self.conn, "ses_arch", "Old", "/p", time_archived=5)
+        self.assertTrue(db.get_session(self.conn, "ses_arch").archived)
 
 
 class DescribeTest(unittest.TestCase):
