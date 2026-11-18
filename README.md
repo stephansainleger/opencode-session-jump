@@ -86,6 +86,9 @@ ocjump --no-state      # skip tmux probing (offline / tests)
 ocjump --open split    # action for a closed session: session | window | split
 ocjump --sort attention     # order: recent (default) | attention
 ocjump --command opencode   # executable used to open a session
+ocjump --max-sessions 50    # cap the rows read from the store
+ocjump --status             # one-line segment for a tmux status bar
+ocjump --status-colors never  # plain text segment (always | never)
 ```
 
 Inside the picker: type to fuzzy-filter, `Enter` (or **double-click**)
@@ -191,7 +194,6 @@ are ordered timestamp first, then the common keys:
 
 The `-0` records are the seven display fields separated by tabs:
 `glyph, label, age, directory, title, session_id, pane_id` (never colored).
-
 ## Configuration
 
 Optional, under `~/.config/ocjump/config.ini` (override the path with
@@ -205,6 +207,7 @@ session_prefix = oc-
 theme = opencode      ; opencode | ansi
 sort = recent         ; recent | attention
 search = text         ; text (directory+title) | all
+status_colors = always ; always | never (for --status)
 # db = /path/to/opencode.db
 ```
 
@@ -216,7 +219,33 @@ search = text         ; text (directory+title) | all
 | `theme`          | `opencode` | color palette (`opencode` or `ansi`)     |
 | `sort`           | `recent`   | order (`recent` or `attention`)          |
 | `search`         | `text`     | filter scope (`text` = dir+title, `all`) |
+| `status_colors`  | `always`   | tmux colors in `--status` (`always`/`never`) |
 | `db`             | *(auto)*   | override the OpenCode store path         |
+
+## Status line
+
+`ocjump --status` prints one compact segment for your tmux bar:
+
+```text
+OC:49 ●7 ⏸1 ✓41
+```
+
+`OC` is the session total; `●` working, `⏸` waiting for a permission, `?`
+waiting for an answer, `✓` done, `✗` error, `·` historical (no live pane).
+Empty categories are omitted, so the segment stays short. Colors use the
+palette's hex values as tmux styles; the `ansi` palette and
+`--status-colors never` (or `$NO_COLOR`) print plain text. The command never
+fails: an unreadable store prints `OC:?` and exits 0.
+
+Add it to `status-right` (or `status-left`) yourself:
+
+```tmux
+set -g status-right '#(ocjump --status) | %H:%M'
+```
+
+The command reads the store read-only and probes tmux panes; it takes about
+0.1 s even with hundreds of sessions. Keep `status-interval` reasonable
+(5–15 s) and use `--max-sessions` if you want a hard cap.
 
 ## How it works
 

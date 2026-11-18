@@ -15,12 +15,29 @@ from dataclasses import dataclass
 
 from .db import Session
 from .panes import Pane
-from .state import priority, style
+from .state import (
+    DONE,
+    ERROR,
+    UNKNOWN,
+    WAITING_PERMISSION,
+    WAITING_QUESTION,
+    WORKING,
+    priority,
+    style,
+)
 from .theme import Palette
 
 FIELD_SEP = "\t"
 FZF_VISIBLE_FIELDS = "1,2,3,4,5"
 ANSI_RESET = "\x1b[0m"
+STATUS_STATES = (
+    WORKING,
+    WAITING_PERMISSION,
+    WAITING_QUESTION,
+    DONE,
+    ERROR,
+    UNKNOWN,
+)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -269,3 +286,41 @@ def human_table(records: list[Record], palette: Palette, color: bool = False) ->
             columns[0] = f"\x1b[{palette.sgr(style(record.state).role)}m{columns[0]}{ANSI_RESET}"
         lines.append("  ".join(columns).rstrip())
     return "\n".join(lines) + "\n"
+
+
+def _tmux_colour(value: str) -> str:
+    """Return a tmux style sequence for a hex palette value, or ``""``.
+
+    tmux styles accept ``#rrggbb`` but not SGR parameters, so the ``ansi``
+    palette (which stores SGR codes) deliberately yields plain text.
+    """
+    if value.startswith("#") and len(value) == 7:
+        return f"#[fg={value}]"
+    return ""
+
+
+def status_line(
+    records: list[Record], palette: Palette | None = None, color: bool = True
+) -> str:
+    """Render one compact status-line segment such as ``OC:49 ●7 ⏸1 ✓41``.
+
+    Categories with no session are omitted so the segment stays short.  When
+    ``color`` is true and the palette holds hex colors, every glyph is wrapped
+    in a tmux style sequence and reset immediately, leaving the count plain.
+    """
+    counts: dict[str, int] = {}
+    for record in records:
+        counts[record.state] = counts.get(record.state, 0) + 1
+    parts = [f"OC:{len(records)}"]
+    for raw in STATUS_STATES:
+        count = counts.get(raw, 0)
+        if count == 0:
+            continue
+        state_style = style(raw)
+        token = f"{state_style.glyph}{count}"
+        if color and palette is not None:
+            colour = _tmux_colour(palette.state_colors.get(state_style.role, ""))
+            if colour:
+                token = f"{colour}{state_style.glyph}#[default]{count}"
+        parts.append(token)
+    return " ".join(parts)

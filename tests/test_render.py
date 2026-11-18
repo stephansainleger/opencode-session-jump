@@ -231,3 +231,44 @@ class SortRecordsTest(unittest.TestCase):
         records = [_state_record("working", 1), _state_record("working", 9)]
         ordered = [r.session.time_updated for r in render.sort_records(records, "attention")]
         self.assertEqual(ordered, [9, 1])
+
+
+class StatusLineTest(unittest.TestCase):
+    """The compact status segment counts live states and omits empty buckets."""
+
+    def test_counts_in_fixed_order(self) -> None:
+        """Working, both waiting kinds and done are reported in fixed order."""
+        records = [
+            _state_record("working", 1),
+            _state_record("waiting-permission", 2),
+            _state_record("waiting-question", 3),
+            _state_record("done", 4),
+            _state_record("done", 5),
+        ]
+        self.assertEqual(render.status_line(records, color=False), "OC:5 ●1 ⏸1 ?1 ✓2")
+
+    def test_unknown_and_error_are_reported(self) -> None:
+        """Unbound sessions count as unknown; errors have their own glyph."""
+        records = [_state_record("", 1), _state_record("error", 2)]
+        self.assertEqual(render.status_line(records, color=False), "OC:2 ✗1 ·1")
+
+    def test_empty_list_is_a_zero_total(self) -> None:
+        """No sessions still yields a parseable segment."""
+        self.assertEqual(render.status_line([], color=False), "OC:0")
+
+    def test_hex_palette_colors_each_glyph(self) -> None:
+        """The default palette wraps glyphs in tmux styles and resets them."""
+        line = render.status_line([_state_record("working", 1)], theme.load("opencode"))
+        self.assertIn("#[fg=#7fd88f]●#[default]1", line)
+
+    def test_ansi_palette_stays_plain(self) -> None:
+        """The ANSI palette stores SGR codes, which tmux styles cannot use."""
+        line = render.status_line([_state_record("working", 1)], PALETTE)
+        self.assertNotIn("#[", line)
+
+    def test_color_false_is_plain_even_with_a_hex_palette(self) -> None:
+        """Disabling color yields no tmux style sequence at all."""
+        line = render.status_line(
+            [_state_record("working", 1)], theme.load("opencode"), color=False
+        )
+        self.assertEqual(line, "OC:1 ●1")

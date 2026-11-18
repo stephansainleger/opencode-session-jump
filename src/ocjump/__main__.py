@@ -1,9 +1,10 @@
 """Command-line entry point for ``ocjump``.
 
-Modes: the default interactive fzf picker, ``--list`` (human/JSON/NUL listing)
-and ``--preview <session-id>`` used by fzf's preview pane.  The picker only ever
-reads the OpenCode store; mutation is limited to focusing or spawning tmux
-sessions, windows or panes.
+Modes: the default interactive fzf picker, ``--list`` (human/JSON/NUL listing),
+``--preview <session-id>`` used by fzf's preview pane, and ``--status`` for a
+compact tmux status-line segment.  The picker only ever reads the OpenCode
+store; mutation is limited to focusing or spawning tmux sessions, windows or
+panes.
 """
 
 from __future__ import annotations
@@ -68,6 +69,8 @@ class Settings:
     sort: str = config.DEFAULT_SORT
     search: str = config.DEFAULT_SEARCH
     no_state: bool = False
+    status_colors: str = config.DEFAULT_STATUS_COLORS
+    max_sessions: int = 0
 
 
 @dataclass(frozen=True)
@@ -76,6 +79,17 @@ class PickerResult:
 
     session_id: str = ""
     pane_id: str = ""
+
+
+def _non_negative_int(text: str) -> int:
+    """Parse a non-negative integer option, rejecting negative or bad values."""
+    try:
+        value = int(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected an integer, got {text!r}") from exc
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {value}")
+    return value
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -110,9 +124,28 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-state", action="store_true", help="Skip tmux probing (offline / tests)"
     )
-    parser.add_argument("--list", action="store_true", help="Print sessions and exit")
     parser.add_argument(
+        "--max-sessions",
+        type=_non_negative_int,
+        default=0,
+        metavar="N",
+        help="Cap the sessions read from the store (0 = no limit)",
+    )
+    parser.add_argument(
+        "--status-colors",
+        choices=config.STATUS_COLOR_MODES,
+        default=None,
+        help="Color the --status segment (default: config, then always)",
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--list", action="store_true", help="Print sessions and exit")
+    mode.add_argument(
         "--preview", metavar="SESSION_ID", help="Print the preview for one session and exit"
+    )
+    mode.add_argument(
+        "--status",
+        action="store_true",
+        help="Print one compact status-line segment and exit",
     )
     parser.add_argument("--json", "-j", action="store_true", help="NDJSON output for --list")
     parser.add_argument(
@@ -134,20 +167,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _records(
-    settings: Settings, include_children: bool
+    settings: Settings, include_children: bool, log_timings: bool = True
 ) -> tuple[list[render.Record], dict[str, Pane]]:
     """Load sessions, probe panes and pair them into display records.
 
     Timings are logged (``records_ms`` / ``connect_ms`` / ``list_ms`` /
     ``panes_ms``) so a slow refresh after an action can be attributed to the
-    store read rather than guessed at.
+    store read rather than guessed at.  ``log_timings`` is disabled for
+    ``--status``, whose frequent refresh must not grow the log file.
     """
     start = time.perf_counter()
     connect_start = time.perf_counter()
     with db.connect(settings.db) as conn:
         connect_ms = (time.perf_counter() - connect_start) * 1000
         list_start = time.perf_counter()
-        sessions = db.list_sessions(conn, include_children=include_children)
+        sessions = db.list_sessions(
+            conn,
+            include_children=include_children,
+            limit=settings.max_sessions,
+        )
         list_ms = (time.perf_counter() - list_start) * 1000
     panes_start = time.perf_counter()
     panes = [] if settings.no_state else list_panes()
@@ -160,20 +198,44 @@ def _records(
     ]
     records = render.sort_records(records, settings.sort)
     panes_by_id = {pane.pane_id: pane for pane in panes}
-    log.log(
-        "records",
-        sessions=len(sessions),
-        connect_ms=round(connect_ms, 1),
-        list_ms=round(list_ms, 1),
-        panes_ms=round(panes_ms, 1),
-        records_ms=round((time.perf_counter() - start) * 1000, 1),
-    )
+    if log_timings:
+        log.log(
+            "records",
+            sessions=len(sessions),
+            connect_ms=round(connect_ms, 1),
+            list_ms=round(list_ms, 1),
+            panes_ms=round(panes_ms, 1),
+            records_ms=round((time.perf_counter() - start) * 1000, 1),
+        )
     return records, panes_by_id
 
 
 def _use_color() -> bool:
     """Return whether ANSI color should be emitted (honors ``$NO_COLOR``)."""
     return not os.environ.get("NO_COLOR")
+
+
+def _status_color(settings: Settings) -> bool:
+    """Return whether tmux style sequences belong in the status segment.
+
+    tmux captures ``#()`` output through a pipe, so ``isatty`` cannot decide;
+    the configured mode does, with ``$NO_COLOR`` always winning.
+    """
+    return settings.status_colors == "always" and _use_color()
+
+
+def _status_output(settings: Settings, palette: theme.Palette) -> str:
+    """Compute the status-line segment, degrading to ``OC:?`` on read errors.
+
+    The caller is tmux's status refresh: it must never raise, and a single
+    short token keeps the bar readable when the store is unavailable.
+    """
+    try:
+        records, _ = _records(settings, include_children=False, log_timings=False)
+    except (FileNotFoundError, sqlite3.Error, db.SchemaError) as exc:
+        log.log("status_error", error=repr(exc))
+        return "OC:?"
+    return render.status_line(records, palette, color=_status_color(settings))
 
 
 def _print_list(
@@ -208,12 +270,14 @@ def _exe() -> str:
 def _common_args(settings: Settings) -> str:
     """Shell flags reproducing the effective settings for a callback run.
 
-    Only the store path and the two flags that change output matter: the DB,
-    ``--no-state`` and a non-default ``--command``.
+    Only flags that change the visible row set or its state matter: the DB,
+    ``--no-state``, a non-default ``--command`` and a session cap.
     """
     parts = ["--db", shlex.quote(str(settings.db))]
     if settings.no_state:
         parts.append("--no-state")
+    if settings.max_sessions:
+        parts += ["--max-sessions", str(settings.max_sessions)]
     if settings.command != config.DEFAULT_COMMAND:
         parts += ["--command", shlex.quote(settings.command)]
     return " ".join(parts)
@@ -582,6 +646,8 @@ def _load_settings(args: argparse.Namespace) -> Settings:
         sort=args.sort or cfg.sort,
         search=cfg.search,
         no_state=args.no_state,
+        status_colors=args.status_colors or cfg.status_colors,
+        max_sessions=args.max_sessions,
     )
 
 
@@ -595,6 +661,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ocjump: {exc}", file=sys.stderr)
         _notify(f"config error: {exc}")
         return 1
+
+    if args.status:
+        print(_status_output(settings, palette))
+        return 0
 
     if args.list_lines:
         records, _ = _records(settings, args.all)

@@ -11,6 +11,7 @@ The format is INI so it needs no third-party parser and stays easy to edit::
     theme = opencode      ; opencode | ansi
     sort = recent         ; recent | attention
     search = text         ; text (title+directory) | all
+    status_colors = always ; always | never (for `--status`)
     # db = /path/to/opencode.db
 """
 
@@ -28,12 +29,14 @@ ENV_CONFIG = "OCJUMP_CONFIG"
 OPEN_ACTIONS = ("session", "window", "split")
 SORT_MODES = ("recent", "attention")
 SEARCH_SCOPES = ("text", "all")
+STATUS_COLOR_MODES = ("always", "never")
 DEFAULT_OPEN_ACTION = "session"
 DEFAULT_COMMAND = "opencode"
 DEFAULT_SESSION_PREFIX = "oc-"
 DEFAULT_THEME = "opencode"
 DEFAULT_SORT = "recent"
 DEFAULT_SEARCH = "text"
+DEFAULT_STATUS_COLORS = "always"
 
 
 class ConfigError(RuntimeError):
@@ -50,6 +53,7 @@ class Config:
     theme: str = DEFAULT_THEME
     sort: str = DEFAULT_SORT
     search: str = DEFAULT_SEARCH
+    status_colors: str = DEFAULT_STATUS_COLORS
     db: str | None = None
 
 
@@ -101,5 +105,6 @@ def load(path: Path | None = None) -> Config:
         theme=value("theme", DEFAULT_THEME) or DEFAULT_THEME,
         sort=choice("sort", DEFAULT_SORT, SORT_MODES),
         search=choice("search", DEFAULT_SEARCH, SEARCH_SCOPES),
+        status_colors=choice("status_colors", DEFAULT_STATUS_COLORS, STATUS_COLOR_MODES),
         db=value("db", None),
     )

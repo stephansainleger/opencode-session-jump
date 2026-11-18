@@ -163,20 +163,28 @@ def connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def list_sessions(conn: sqlite3.Connection, include_children: bool = False) -> list[Session]:
+def list_sessions(
+    conn: sqlite3.Connection,
+    include_children: bool = False,
+    limit: int = 0,
+) -> list[Session]:
     """Return persisted sessions, most recently updated first.
 
-    Sub-agent sessions (non-null ``parent_id``) and archived sessions are
-    hidden unless ``include_children`` is true.
+    Sub-agent sessions (non-null ``parent_id``) are hidden unless
+    ``include_children`` is true.  ``limit`` caps the rows when positive, so a
+    frequent caller (for example ``--status``) can bound its cost.
     """
     where = ["time_archived IS NULL"]
     if not include_children:
         where.append("parent_id IS NULL")
     query = (
         "SELECT id, title, directory, time_updated, agent, model "
-        f"FROM session WHERE {' AND '.join(where)} "
-        "ORDER BY time_updated DESC"
+        "FROM session"
     )
+    query += f" WHERE {' AND '.join(where)}"
+    query += " ORDER BY time_updated DESC"
+    if limit > 0:
+        query += f" LIMIT {int(limit)}"
     return [
         Session(
             session_id=row["id"],

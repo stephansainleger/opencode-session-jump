@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import support
+from ocjump import __main__ as main_mod
 from ocjump import config
 from ocjump.__main__ import main
 
@@ -125,3 +126,78 @@ class CallbackTest(unittest.TestCase):
         code, out = self._run(["--action", "delete", "--session", "ses_a"])
         self.assertEqual(code, 0)
         self.assertEqual(out, "")
+
+
+class StatusTest(unittest.TestCase):
+    """``--status`` is non-interactive and safe for tmux's status refresh."""
+
+    def setUp(self) -> None:
+        """Create a two-session store and redirect diagnostic logging."""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name) / "state"
+        patcher = mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.state)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.db_path = Path(self.tmp.name) / "opencode.db"
+        conn = support.make_db(self.db_path)
+        support.add_session(conn, "ses_a", "Alpha", "/p", time_updated=20)
+        support.add_session(conn, "ses_b", "Beta", "/p", time_updated=10)
+        conn.close()
+
+    def _run(self, argv: list[str]) -> tuple[int, str]:
+        """Run ``main`` and capture stdout."""
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = main(["--no-state", "--db", str(self.db_path)] + argv)
+        return code, buffer.getvalue()
+
+    def test_status_counts_unbound_sessions(self) -> None:
+        """Without pane probing every session is an unknown historical row."""
+        code, out = self._run(["--status", "--status-colors", "never"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "OC:2 ·2\n")
+
+    def test_status_uses_tmux_styles_by_default(self) -> None:
+        """The default mode emits tmux style sequences around the glyph."""
+        _, out = self._run(["--status"])
+        self.assertIn("#[fg=#808080]·#[default]", out)
+
+    def test_status_respects_no_color(self) -> None:
+        """$NO_COLOR forces a plain segment even with the default mode."""
+        with mock.patch.dict(os.environ, {"NO_COLOR": "1"}):
+            _, out = self._run(["--status"])
+        self.assertEqual(out, "OC:2 ·2\n")
+
+    def test_status_degrades_without_a_store(self) -> None:
+        """An unreadable store yields ``OC:?`` and exit 0, never an exception."""
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = main(
+                ["--no-state", "--db", str(Path(self.tmp.name) / "absent.db"), "--status"]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(buffer.getvalue(), "OC:?\n")
+
+    def test_status_and_list_are_mutually_exclusive(self) -> None:
+        """A mixed mode is rejected instead of silently picking one."""
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                main(["--status", "--list"])
+        self.assertEqual(caught.exception.code, 2)
+
+
+class CommonArgsTest(unittest.TestCase):
+    """Callbacks must reproduce the visible row set after a refresh."""
+
+    def test_session_cap_is_forwarded(self) -> None:
+        """The reload command keeps the session cap."""
+        settings = main_mod.Settings(
+            db=Path("/tmp/x.db"),
+            command="opencode",
+            open_action="session",
+            session_prefix="oc-",
+            max_sessions=5,
+        )
+        args = main_mod._common_args(settings)
+        self.assertIn("--max-sessions 5", args)

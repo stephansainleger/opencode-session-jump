@@ -31,6 +31,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.theme, config.DEFAULT_THEME)
         self.assertEqual(cfg.sort, config.DEFAULT_SORT)
         self.assertEqual(cfg.search, config.DEFAULT_SEARCH)
+        self.assertEqual(cfg.status_colors, config.DEFAULT_STATUS_COLORS)
         self.assertIsNone(cfg.db)
 
     def test_reads_values(self) -> None:
@@ -43,6 +44,7 @@ class ConfigTest(unittest.TestCase):
             "theme = ansi\n"
             "sort = attention\n"
             "search = all\n"
+            "status_colors = never\n"
             "db = /tmp/x.db\n"
         )
         cfg = config.load(self.path)
@@ -52,11 +54,12 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.theme, "ansi")
         self.assertEqual(cfg.sort, "attention")
         self.assertEqual(cfg.search, "all")
+        self.assertEqual(cfg.status_colors, "never")
         self.assertEqual(cfg.db, "/tmp/x.db")
 
     def test_invalid_choices_raise(self) -> None:
         """Unknown open/sort/search values are rejected with a clear error."""
-        for key in ("open", "sort", "search"):
+        for key in ("open", "sort", "search", "status_colors"):
             with self.subTest(key=key):
                 self._write(f"[ocjump]\n{key} = nope\n")
                 with self.assertRaises(config.ConfigError):
