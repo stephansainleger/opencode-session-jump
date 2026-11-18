@@ -44,11 +44,44 @@ CREATE TABLE part (
 """
 
 
+V2_SCHEMA = """
+CREATE TABLE session_v2 (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL DEFAULT 'p',
+    parent_id TEXT,
+    directory TEXT NOT NULL,
+    title TEXT NOT NULL,
+    time_created INTEGER NOT NULL DEFAULT 0,
+    time_updated INTEGER NOT NULL DEFAULT 0,
+    time_archived INTEGER,
+    agent TEXT,
+    model TEXT
+);
+CREATE TABLE session_message (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    seq INTEGER NOT NULL DEFAULT 0,
+    time_created INTEGER NOT NULL DEFAULT 0,
+    time_updated INTEGER NOT NULL DEFAULT 0,
+    data TEXT NOT NULL
+);
+"""
+
+
 def make_db(path: Path) -> sqlite3.Connection:
     """Create and return a connection to a minimal OpenCode store at ``path``."""
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    conn.commit()
+    return conn
+
+
+def make_v2_db(path: Path) -> sqlite3.Connection:
+    """Create a store with both the v1 and the v2 session/message tables."""
+    conn = make_db(path)
+    conn.executescript(V2_SCHEMA)
     conn.commit()
     return conn
 
@@ -75,6 +108,59 @@ def add_session(
             time_archived,
             "build",
             json.dumps({"id": "m", "providerID": "prov"}),
+        ),
+    )
+    conn.commit()
+
+
+def add_session_v2(
+    conn: sqlite3.Connection,
+    session_id: str,
+    title: str,
+    directory: str,
+    time_updated: int = 1000,
+    parent_id: str | None = None,
+    time_archived: int | None = None,
+) -> None:
+    """Insert one ``session_v2`` row with sane defaults."""
+    conn.execute(
+        "INSERT INTO session_v2 (id, title, directory, time_updated, parent_id, "
+        "time_archived, agent, model) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            session_id,
+            title,
+            directory,
+            time_updated,
+            parent_id,
+            time_archived,
+            "build",
+            json.dumps({"id": "m", "providerID": "prov"}),
+        ),
+    )
+    conn.commit()
+
+
+def add_message_v2(
+    conn: sqlite3.Connection,
+    message_id: str,
+    session_id: str,
+    kind: str,
+    payload: dict,
+    time_created: int = 0,
+    seq: int = 0,
+) -> None:
+    """Insert one v2 ``session_message`` row with an embedded content payload."""
+    conn.execute(
+        "INSERT INTO session_message (id, session_id, type, seq, time_created, "
+        "time_updated, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            message_id,
+            session_id,
+            kind,
+            seq,
+            time_created,
+            time_created,
+            json.dumps(payload),
         ),
     )
     conn.commit()

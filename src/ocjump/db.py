@@ -33,6 +33,8 @@ REQUIRED_SESSION_COLUMNS = frozenset(
     {"id", "title", "directory", "time_updated", "parent_id", "time_archived", "agent", "model"}
 )
 
+SESSION_COLUMNS = "id, title, directory, time_updated, time_archived, parent_id, agent, model"
+
 PREVIEW_DEFAULT_DIRECT = 4
 PREVIEW_MAX_PARTS = 40
 
@@ -171,24 +173,51 @@ def resolve_db_path(
     return default
 
 
+def _table_names(conn: sqlite3.Connection) -> set[str]:
+    """Return the SQLite table names present in the store."""
+    return {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+
+
+def _session_source(conn: sqlite3.Connection) -> str:
+    """Return the SQL source for the canonical session table.
+
+    OpenCode 2 keeps ``session_v2`` as the canonical table. Reading it alone
+    avoids legacy rows that OpenCode 2 can no longer delete (for example the
+    ghosts left when ``session delete`` removes only ``session_v2``). OpenCode 1,
+    which has no ``session_v2``, keeps reading ``session``.
+    """
+    tables = _table_names(conn)
+    if "session_v2" in tables:
+        return f"(SELECT {SESSION_COLUMNS} FROM session_v2)"
+    return f"(SELECT {SESSION_COLUMNS} FROM session)"
+
+
 def validate_schema(conn: sqlite3.Connection, path: Path) -> None:
-    """Verify the store has the ``session`` schema the picker needs.
+    """Verify the store exposes the session schema the picker needs.
+
+    OpenCode 1 stores sessions in ``session``; OpenCode 2 adds ``session_v2``
+    and keeps ``session`` as a compatibility table. Both are accepted, and
+    every present table must carry the columns the picker reads.
 
     Raises:
         SchemaError: when the store is a pre-SQLite install or an unsupported
             schema, so the user gets an actionable message.
     """
-    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    if "session" not in tables:
+    tables = _table_names(conn)
+    table = "session_v2" if "session_v2" in tables else "session"
+    if table not in tables:
         raise SchemaError(
-            f"{path} has no 'session' table — it is not a supported OpenCode store "
-            "(pre-SQLite/legacy layout)."
+            f"{path} has no 'session' or 'session_v2' table — it is not a supported "
+            "OpenCode store (pre-SQLite/legacy layout)."
         )
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(session)")}
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
     missing = REQUIRED_SESSION_COLUMNS - columns
     if missing:
         raise SchemaError(
-            f"{path} uses an unsupported OpenCode schema: session is missing "
+            f"{path} uses an unsupported OpenCode schema: {table} is missing "
             f"{', '.join(sorted(missing))}."
         )
 
@@ -232,8 +261,8 @@ def list_sessions(
     if not include_children:
         where.append("parent_id IS NULL")
     query = (
-        "SELECT id, title, directory, time_updated, time_archived, agent, model "
-        "FROM session"
+        f"SELECT {SESSION_COLUMNS} "
+        f"FROM {_session_source(conn)} AS sessions"
     )
     if where:
         query += f" WHERE {' AND '.join(where)}"
@@ -261,8 +290,7 @@ def get_session(conn: sqlite3.Connection, session_id: str) -> Session:
         KeyError: no such session exists.
     """
     row = conn.execute(
-        "SELECT id, title, directory, time_updated, time_archived, agent, model "
-        "FROM session WHERE id=?",
+        f"SELECT {SESSION_COLUMNS} FROM {_session_source(conn)} AS sessions WHERE id=?",
         (session_id,),
     ).fetchone()
     if row is None:
@@ -278,16 +306,13 @@ def get_session(conn: sqlite3.Connection, session_id: str) -> Session:
     )
 
 
-def _preview_part(data: str) -> PreviewPart | None:
-    """Turn one ``part`` row into a typed, render-ready :class:`PreviewPart`.
+def _preview_part_obj(part) -> PreviewPart | None:
+    """Turn one parsed part/content object into a :class:`PreviewPart`.
 
-    Text and reasoning parts carry a ``text`` field; tool parts keep their tool
-    name and last ``state.status`` so the renderer can color them.  Unknown or
-    malformed parts are skipped instead of producing empty noise.
+    Text and reasoning carry a ``text`` field; tool entries keep their name
+    (``tool`` in v1 parts, ``name`` in v2 content) and last ``state.status``.
     """
-    try:
-        part = json.loads(data)
-    except (TypeError, ValueError):
+    if not isinstance(part, dict):
         return None
     kind = part.get("type")
     if kind == "text":
@@ -297,10 +322,19 @@ def _preview_part(data: str) -> PreviewPart | None:
         text = (part.get("text") or "").strip()
         return PreviewPart("reasoning", text) if text else None
     if kind == "tool":
-        tool = part.get("tool") or "tool"
+        tool = part.get("tool") or part.get("name") or "tool"
         status = (part.get("state") or {}).get("status") or "?"
         return PreviewPart("tool", tool=tool, status=status)
     return None
+
+
+def _preview_part(data: str) -> PreviewPart | None:
+    """Turn one ``part`` row payload into a typed, render-ready part."""
+    try:
+        part = json.loads(data)
+    except (TypeError, ValueError):
+        return None
+    return _preview_part_obj(part)
 
 
 def _build_preview_message(row: sqlite3.Row, part_data: list[str]) -> PreviewMessage:
@@ -323,6 +357,36 @@ def _build_preview_message(row: sqlite3.Row, part_data: list[str]) -> PreviewMes
     )
 
 
+def _build_preview_message_v2(row: sqlite3.Row) -> PreviewMessage:
+    """Build one preview message from a v2 ``session_message`` row.
+
+    V2 stores parts inside ``data.content`` for assistant messages and the
+    prompt text directly in ``data.text`` for user messages.
+    """
+    try:
+        payload = json.loads(row["data"])
+    except (TypeError, ValueError):
+        payload = {}
+    role = row["type"] or payload.get("role") or "?"
+    content = payload.get("content")
+    if isinstance(content, list):
+        parts = tuple(
+            part
+            for part in (
+                _preview_part_obj(item) for item in content[:PREVIEW_MAX_PARTS]
+            )
+            if part is not None
+        )
+    else:
+        text = (payload.get("text") or "").strip()
+        parts = (PreviewPart("text", text),) if text else ()
+    return PreviewMessage(
+        role=role,
+        time_created=int(row["time_created"] or 0),
+        parts=parts,
+    )
+
+
 def load_preview(
     conn: sqlite3.Connection,
     session_id: str,
@@ -332,14 +396,44 @@ def load_preview(
 
     Walking backwards from the newest message keeps every intermediate
     assistant step between the direct entries, so the window size adapts to the
-    conversation instead of being a fixed message count.  Parts stay typed for
+    conversation instead of being a fixed message count. Parts stay typed for
     the renderer, and ``total``/``omitted`` let it report the window honestly.
+
+    OpenCode 2 stores messages in ``session_message`` with parts embedded in
+    ``data.content``. Legacy sessions keep using ``message`` + ``part``.
 
     Raises:
         ValueError: ``direct_limit`` is lower than one.
     """
     if direct_limit < 1:
         raise ValueError(f"preview direct limit must be positive, got {direct_limit}")
+
+    if "session_message" in _table_names(conn):
+        v2_rows = list(
+            conn.execute(
+                "SELECT id, type, time_created, data FROM session_message "
+                "WHERE session_id=? ORDER BY time_created DESC, seq DESC",
+                (session_id,),
+            )
+        )
+        if v2_rows:
+            selected: list[PreviewMessage] = []
+            direct_count = 0
+            for row in v2_rows:
+                message = _build_preview_message_v2(row)
+                selected.append(message)
+                if is_direct_message(message):
+                    direct_count += 1
+                    if direct_count >= direct_limit:
+                        break
+            selected.reverse()
+            total = len(v2_rows)
+            return Preview(
+                messages=tuple(selected),
+                total=total,
+                omitted=max(0, total - len(selected)),
+            )
+
     message_rows = list(
         conn.execute(
             "SELECT id, data, time_created FROM message WHERE session_id=? "
@@ -354,7 +448,7 @@ def load_preview(
         (session_id,),
     ):
         parts_by_message.setdefault(part_row["message_id"], []).append(part_row["data"])
-    selected: list[PreviewMessage] = []
+    selected = []
     direct_count = 0
     for row in message_rows:
         message = _build_preview_message(row, parts_by_message.get(row["id"], []))

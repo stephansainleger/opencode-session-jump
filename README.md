@@ -14,7 +14,8 @@ and arming a delete confirmation. Regenerate the demo with
 `python3 tools/render-demo.py` (needs `asciinema` and `agg`).*
 
 > **Platform:** Linux + tmux ≥ 3.2 only (it drives `tmux` and reads the
-> OpenCode SQLite store directly). Tested against OpenCode **1.18.x**.
+> OpenCode SQLite store directly). Tested against OpenCode **1.18.x** and
+> **2.3.2**.
 
 ## Why
 
@@ -26,7 +27,8 @@ fast: **what is running, what is waiting, and where is it?**
 
 ## Requirements
 
-- [OpenCode](https://opencode.ai) CLI (V1, tested against 1.18.x).
+- [OpenCode](https://opencode.ai) CLI (1.x and 2.x; tested against 1.18.x and
+  2.3.2).
 - `tmux` ≥ 3.2 (for `display-popup`).
 - [`fzf`](https://github.com/junegunn/fzf) (the picker; mouse double-click accepts).
 - `python3` ≥ 3.10 — **standard library only**, no dependencies.
@@ -272,11 +274,18 @@ The command reads the store read-only and probes tmux panes; it takes about
 ### Data source
 
 Sessions are read **read-only** from the OpenCode SQLite store. The path is
-resolved as: `--db` → `$OPENCODE_DB` → `opencode db path` (authoritative,
-handles the channel suffix) → `$XDG_DATA_HOME/opencode/opencode.db`
-(`opencode-<channel>.db` for non-stable `$OPENCODE_CHANNEL`). The connection
-uses `mode=ro` + `PRAGMA query_only=1`, and the schema is validated up-front so
-an unsupported OpenCode version fails with a clear message.
+resolved as: `--db` → `$OPENCODE_DB` → the conventional
+`$XDG_DATA_HOME/opencode/opencode.db` (`opencode-<channel>.db` for non-stable
+`$OPENCODE_CHANNEL`) when it exists → the `opencode db path` probe as a v1
+fallback. OpenCode 2 has no `db` command, so the conventional path is used. The
+connection uses `mode=ro` + `PRAGMA query_only=1`, and the schema is validated
+up-front so an unsupported OpenCode version fails with a clear message.
+
+On OpenCode 2 the picker reads the canonical `session_v2` table. The legacy
+`session` table is used only when `session_v2` is absent (OpenCode 1), so
+legacy-only rows — including ghosts left when OpenCode 2 deletes a session —
+are not listed. Previews use `session_message` for v2 sessions and fall back to
+`message` / `part` for legacy sessions.
 
 ### Session ↔ pane mapping
 

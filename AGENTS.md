@@ -83,9 +83,14 @@ optimizing (`time opencode session delete <bogus>`).
   with the `D` rules). Document contract and *why*, not line-by-line *how*.
 - Read the OpenCode store **read-only** (`file:...?mode=ro`, `PRAGMA query_only`)
   so the picker never mutates a database owned by the running `opencode` binary.
-  Resolve the path via `--db` → `$OPENCODE_DB` → `opencode db path` (handles the
-  channel suffix) → `$XDG_DATA_HOME/opencode/opencode.db`; always validate the
-  schema and fail with an actionable `SchemaError` on an unsupported store.
+  Resolve the path via `--db` → `$OPENCODE_DB` → the conventional
+  `$XDG_DATA_HOME/opencode/opencode.db` (or `opencode-<channel>.db` for a
+  non-stable `$OPENCODE_CHANNEL`) when it exists → the `opencode db path` probe
+  as a v1 fallback; always validate the schema and fail with an actionable
+  `SchemaError` on an unsupported store. On OpenCode 2 the picker reads the
+  canonical `session_v2` table and never the legacy `session` table (which may
+  contain ghosts after a v2 deletion); OpenCode 1 uses `session`. Previews use
+  `session_message` and fall back to `message`/`part`.
 - The session↔pane mapping has two tiers, in order: the plugin-published
   `@oc_session_id`, then a title-prefix + working-directory match accepted only
   when exactly one candidate exists. Ambiguity degrades to "unbound" — never

@@ -160,6 +160,56 @@ class ListSessionsTest(unittest.TestCase):
         self.assertEqual(len(db.list_sessions(self.conn, limit=0)), 2)
 
 
+class V2SchemaTest(unittest.TestCase):
+    """OpenCode 2 reads the canonical session table only."""
+
+    def setUp(self) -> None:
+        """Create a store containing both session tables and a legacy ghost."""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.conn = support.make_v2_db(Path(self.tmp.name) / "opencode.db")
+        support.add_session(self.conn, "ses_old", "Old legacy", "/p", time_updated=10)
+        support.add_session_v2(self.conn, "ses_old", "Old v2", "/p", time_updated=20)
+        support.add_session_v2(self.conn, "ses_new", "New v2", "/p", time_updated=30)
+        support.add_session(self.conn, "ses_legacy_only", "Legacy ghost", "/p",
+                            time_updated=5)
+
+    def test_canonical_only_excludes_legacy_rows(self) -> None:
+        """Every canonical session is listed once; legacy-only rows are hidden."""
+        sessions = db.list_sessions(self.conn)
+        self.assertEqual([s.session_id for s in sessions], ["ses_new", "ses_old"])
+        self.assertEqual([s.title for s in sessions], ["New v2", "Old v2"])
+        self.assertNotIn("ses_legacy_only", [s.session_id for s in sessions])
+
+    def test_get_session_prefers_v2_row(self) -> None:
+        """Fetching an id present in both tables returns the canonical row."""
+        self.assertEqual(db.get_session(self.conn, "ses_old").title, "Old v2")
+
+    def test_get_session_legacy_only_raises_keyerror(self) -> None:
+        """A legacy-only row is not reachable when session_v2 is present."""
+        with self.assertRaises(KeyError):
+            db.get_session(self.conn, "ses_legacy_only")
+
+    def test_preview_reads_v2_session_messages(self) -> None:
+        """V2 preview parses embedded content and user prompt text."""
+        support.add_session_v2(self.conn, "ses_msg", "Messages", "/p")
+        support.add_message_v2(self.conn, "m1", "ses_msg", "user",
+                               {"text": "hello"}, time_created=1000, seq=1)
+        support.add_message_v2(self.conn, "m2", "ses_msg", "assistant", {
+            "content": [
+                {"type": "text", "text": "hi"},
+                {"type": "tool", "name": "shell",
+                 "state": {"status": "completed"}},
+            ],
+        }, time_created=2000, seq=2)
+        preview = db.load_preview(self.conn, "ses_msg", direct_limit=2)
+        self.assertEqual([message.role for message in preview.messages], ["user", "assistant"])
+        self.assertEqual(preview.total, 2)
+        self.assertEqual(preview.messages[0].parts[0].text, "hello")
+        self.assertEqual(preview.messages[1].parts[1].tool, "shell")
+        self.assertEqual(preview.messages[1].parts[1].status, "completed")
+
+
 class GetSessionTest(unittest.TestCase):
     """Fetching by id success and failure paths."""
 
