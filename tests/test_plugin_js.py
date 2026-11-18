@@ -21,17 +21,17 @@ MAPPING_PROBE = f"""
 import plugin, {{ stateForEvent }} from "{PLUGIN}"
 const got = {{
   created: stateForEvent({{ type: "session.created" }}),
-  message: stateForEvent({{ type: "message.updated" }}),
+  activity: stateForEvent({{ type: "session.text.delta" }}),
   permission: stateForEvent({{ type: "permission.asked" }}),
   permissionReplied: stateForEvent({{ type: "permission.replied" }}),
-  question: stateForEvent({{ type: "question.asked" }}),
-  questionReplied: stateForEvent({{ type: "question.replied" }}),
-  questionRejected: stateForEvent({{ type: "question.rejected" }}),
+  question: stateForEvent({{ type: "form.created" }}),
+  questionReplied: stateForEvent({{ type: "form.replied" }}),
+  questionCancelled: stateForEvent({{ type: "form.cancelled" }}),
   idle: stateForEvent({{ type: "session.idle" }}),
-  error: stateForEvent({{ type: "session.error" }}),
-  ignored: stateForEvent({{ type: "session.updated" }}),
+  error: stateForEvent({{ type: "session.execution.failed" }}),
+  ignored: stateForEvent({{ type: "session.renamed" }}),
   defaultKeys: Object.keys(plugin).sort(),
-  serverIsFunction: typeof plugin.server === "function",
+  setupIsFunction: typeof plugin.setup === "function",
   pluginId: plugin.id,
 }}
 console.log(JSON.stringify(got))
@@ -52,22 +52,22 @@ const seq = (events) => {{
 const out = {{
   permissionBlocked: seq([
     {{ type: "permission.asked" }},
-    {{ type: "message.part.updated" }},
-    {{ type: "message.updated" }},
+    {{ type: "session.text.delta" }},
+    {{ type: "session.step.started" }},
   ]),
   permissionCleared: seq([
     {{ type: "permission.asked" }},
-    {{ type: "message.part.updated" }},
+    {{ type: "session.text.delta" }},
     {{ type: "permission.replied" }},
-    {{ type: "message.part.updated" }},
+    {{ type: "session.text.delta" }},
   ]),
   questionBlocked: seq([
-    {{ type: "question.asked" }},
-    {{ type: "message.part.updated" }},
+    {{ type: "form.created" }},
+    {{ type: "session.text.delta" }},
   ]),
   questionCleared: seq([
-    {{ type: "question.asked" }},
-    {{ type: "question.rejected" }},
+    {{ type: "form.created" }},
+    {{ type: "form.cancelled" }},
   ]),
   idleClearsWait: seq([
     {{ type: "permission.asked" }},
@@ -78,20 +78,38 @@ console.log(JSON.stringify(out))
 """
 
 WRITE_PROBE = f"""
-import {{ OcStatePlugin }} from "{PLUGIN}"
-const plugin = await OcStatePlugin()
-await plugin.event({{ event: {{ type: "permission.asked", sessionID: "ses_x" }} }})
-await plugin.event({{ event: {{ type: "session.idle", sessionID: "ses_x" }} }})
+import plugin from "{PLUGIN}"
+const events = [
+  {{ type: "permission.asked", data: {{ sessionID: "ses_x" }} }},
+  {{ type: "session.idle", data: {{ sessionID: "ses_x" }} }},
+]
+const ctx = {{
+  event: {{
+    subscribe: async function* () {{
+      for (const event of events) yield event
+    }},
+  }},
+}}
+await plugin.setup(ctx)
 await new Promise((resolve) => setTimeout(resolve, 300))
 """
 
-# A permission wait must survive the ``message.part.updated`` churn that follows
-# it in the real event stream; only the answer may resume ``working``.
+# A permission wait must survive the activity churn that follows it in the real
+# event stream; only the answer may resume ``working``.
 WRITE_WAIT_PROBE = f"""
-import {{ OcStatePlugin }} from "{PLUGIN}"
-const plugin = await OcStatePlugin()
-await plugin.event({{ event: {{ type: "permission.asked", sessionID: "ses_x" }} }})
-await plugin.event({{ event: {{ type: "message.part.updated", sessionID: "ses_x" }} }})
+import plugin from "{PLUGIN}"
+const events = [
+  {{ type: "permission.asked", data: {{ sessionID: "ses_x" }} }},
+  {{ type: "session.text.delta", data: {{ sessionID: "ses_x" }} }},
+]
+const ctx = {{
+  event: {{
+    subscribe: async function* () {{
+      for (const event of events) yield event
+    }},
+  }},
+}}
+await plugin.setup(ctx)
 await new Promise((resolve) => setTimeout(resolve, 300))
 """
 
@@ -110,18 +128,18 @@ class PluginMappingTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         got = json.loads(proc.stdout)
         self.assertEqual(got["created"], "working")
-        self.assertEqual(got["message"], "working")
+        self.assertEqual(got["activity"], "working")
         self.assertEqual(got["permission"], "waiting-permission")
         self.assertEqual(got["permissionReplied"], "working")
         self.assertEqual(got["question"], "waiting-question")
         self.assertEqual(got["questionReplied"], "working")
-        self.assertEqual(got["questionRejected"], "working")
+        self.assertEqual(got["questionCancelled"], "working")
         self.assertEqual(got["idle"], "done")
         self.assertEqual(got["error"], "error")
         self.assertIsNone(got["ignored"])
 
-    def test_wait_lock_survives_message_churn(self) -> None:
-        """A pending permission/question is not overwritten by message events."""
+    def test_wait_lock_survives_activity_churn(self) -> None:
+        """A pending permission/question is not overwritten by activity events."""
         proc = subprocess.run(
             ["node", "--input-type=module", "-e", NEXTSTATE_PROBE],
             capture_output=True,
@@ -149,8 +167,8 @@ class PluginMappingTest(unittest.TestCase):
         self.assertEqual(idle["states"], ["waiting-permission", "done"])
         self.assertIsNone(idle["waiting"])
 
-    def test_default_export_is_a_server_plugin_record(self) -> None:
-        """The default export must be ``{ id, server }`` for OpenCode's loader."""
+    def test_default_export_is_a_v2_plugin_definition(self) -> None:
+        """The default export must be ``{ id, setup }`` for OpenCode 2's loader."""
         proc = subprocess.run(
             ["node", "--input-type=module", "-e", MAPPING_PROBE],
             capture_output=True,
@@ -158,8 +176,8 @@ class PluginMappingTest(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         got = json.loads(proc.stdout)
-        self.assertEqual(got["defaultKeys"], ["id", "server"])
-        self.assertTrue(got["serverIsFunction"])
+        self.assertEqual(got["defaultKeys"], ["id", "setup"])
+        self.assertTrue(got["setupIsFunction"])
         self.assertEqual(got["pluginId"], "oc-state")
 
 

@@ -292,8 +292,8 @@ Ambiguity degrades to "unbound" rather than to a wrong jump.
 
 ### Live-state plugin
 
-`plugin/oc-state.js` subscribes to OpenCode's event bus and writes three tmux
-pane options on the pane running the TUI:
+`plugin/oc-state.js` uses the OpenCode 2 plugin API and writes three tmux pane
+options on the pane running the TUI:
 
 - `@oc_state` — one of `working`, `waiting-permission`, `waiting-question`,
   `done`, `error`;

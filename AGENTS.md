@@ -100,6 +100,8 @@ optimizing (`time opencode session delete <bogus>`).
   styles carry a semantic *role* (`success`, `warning`…) that a palette
   resolves. The default palette mirrors OpenCode's TUI theme; `ansi` is the
   truecolor-free fallback.
-- `plugin/oc-state.js` subscribes to OpenCode's event API directly; that API is
-  the plugin's only coupling to OpenCode, so a change there must be reflected
-  in `stateForEvent`.
+- `plugin/oc-state.js` uses the OpenCode 2 plugin API: its default export is
+  `{ id, setup }`, and `setup` subscribes through `ctx.event.subscribe()` and
+  returns an abort cleanup. The event vocabulary is the plugin's only coupling
+  to OpenCode, so a change there must be reflected in `WAITING_STATES`,
+  `TERMINAL_STATES` and `WORKING_EVENTS`.
