@@ -417,7 +417,7 @@ def _pick(
             f"--with-nth={render.FZF_VISIBLE_FIELDS}",
             "--print-query",
             f"--preview={_preview_command(settings.db)}",
-            "--preview-window=right:50%:wrap:border-left",
+            "--preview-window=right:50%:wrap:border-left:~6",
             f"--preview-label={PREVIEW_LABEL}",
             "--border=rounded",
             f"--border-label={BORDER_LABEL}",
@@ -696,7 +696,8 @@ def main(argv: list[str] | None = None) -> int:
         preview_start = time.perf_counter()
         with db.connect(settings.db) as conn:
             session = db.get_session(conn, args.preview)
-            print(db.describe(conn, session))
+            preview = db.load_preview(conn, session.session_id)
+        print(render.preview_lines(session, preview, palette, color=_use_color()))
         log.log(
             "preview",
             session=args.preview,

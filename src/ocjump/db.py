@@ -33,7 +33,7 @@ REQUIRED_SESSION_COLUMNS = frozenset(
     {"id", "title", "directory", "time_updated", "parent_id", "time_archived", "agent", "model"}
 )
 
-PREVIEW_TEXT_LIMIT = 400
+PREVIEW_DEFAULT_DIRECT = 4
 PREVIEW_MAX_PARTS = 40
 
 
@@ -52,6 +52,55 @@ class Session:
     agent: str | None = None
     model: str | None = None
     archived: bool = False
+
+
+@dataclass(frozen=True)
+class PreviewPart:
+    """One visible unit inside a previewed message.
+
+    ``kind`` is ``text``, ``reasoning`` or ``tool``; tool parts carry the tool
+    name and its last state status so the renderer can label them without
+    re-parsing JSON.
+    """
+
+    kind: str
+    text: str = ""
+    tool: str = ""
+    status: str = ""
+
+
+@dataclass(frozen=True)
+class PreviewMessage:
+    """A message selected for the preview, with its parts kept separate."""
+
+    role: str
+    time_created: int
+    parts: tuple[PreviewPart, ...]
+
+
+@dataclass(frozen=True)
+class Preview:
+    """The tail of a session shown in fzf's preview pane.
+
+    ``messages`` covers the newest messages back to (and including) the
+    ``direct_limit``-th most recent direct message, so a long run of
+    intermediate assistant steps cannot push user-facing text out of view.
+    ``total`` is the whole session's message count and ``omitted`` is how many
+    older messages precede the selected window.
+    """
+
+    messages: tuple[PreviewMessage, ...]
+    total: int
+    omitted: int
+
+
+def is_direct_message(message: PreviewMessage) -> bool:
+    """Return whether a message is a user prompt or contains text for the user."""
+    if message.role == "user":
+        return True
+    if message.role != "assistant":
+        return False
+    return any(part.kind == "text" and part.text.strip() for part in message.parts)
 
 
 def _env_flag(name: str) -> bool:
@@ -229,11 +278,12 @@ def get_session(conn: sqlite3.Connection, session_id: str) -> Session:
     )
 
 
-def _text_of_part(data: str) -> str | None:
-    """Extract the visible text of a single ``part`` row, or ``None``.
+def _preview_part(data: str) -> PreviewPart | None:
+    """Turn one ``part`` row into a typed, render-ready :class:`PreviewPart`.
 
-    Text and reasoning parts carry a ``text`` field; tool parts carry a tool
-    name and a ``state.status`` used to summarize the call.
+    Text and reasoning parts carry a ``text`` field; tool parts keep their tool
+    name and last ``state.status`` so the renderer can color them.  Unknown or
+    malformed parts are skipped instead of producing empty noise.
     """
     try:
         part = json.loads(data)
@@ -242,48 +292,87 @@ def _text_of_part(data: str) -> str | None:
     kind = part.get("type")
     if kind == "text":
         text = (part.get("text") or "").strip()
-        return text or None
+        return PreviewPart("text", text) if text else None
     if kind == "reasoning":
         text = (part.get("text") or "").strip()
-        return f"[thinking] {text}" if text else None
+        return PreviewPart("reasoning", text) if text else None
     if kind == "tool":
         tool = part.get("tool") or "tool"
         status = (part.get("state") or {}).get("status") or "?"
-        return f"[tool:{tool} {status}]"
+        return PreviewPart("tool", tool=tool, status=status)
     return None
 
 
-def _message_lines(conn: sqlite3.Connection, session_id: str, limit: int) -> list[str]:
-    """Return the last ``limit`` messages rendered as ``role: text`` lines."""
-    rows = list(
+def _build_preview_message(row: sqlite3.Row, part_data: list[str]) -> PreviewMessage:
+    """Build one :class:`PreviewMessage` from a message row and its raw parts."""
+    try:
+        role = json.loads(row["data"]).get("role", "?")
+    except (TypeError, ValueError):
+        role = "?"
+    parts = tuple(
+        part
+        for part in (
+            _preview_part(data) for data in part_data[:PREVIEW_MAX_PARTS]
+        )
+        if part is not None
+    )
+    return PreviewMessage(
+        role=role,
+        time_created=int(row["time_created"]),
+        parts=parts,
+    )
+
+
+def load_preview(
+    conn: sqlite3.Connection,
+    session_id: str,
+    direct_limit: int = PREVIEW_DEFAULT_DIRECT,
+) -> Preview:
+    """Load the newest window containing ``direct_limit`` direct messages.
+
+    Walking backwards from the newest message keeps every intermediate
+    assistant step between the direct entries, so the window size adapts to the
+    conversation instead of being a fixed message count.  Parts stay typed for
+    the renderer, and ``total``/``omitted`` let it report the window honestly.
+
+    Raises:
+        ValueError: ``direct_limit`` is lower than one.
+    """
+    if direct_limit < 1:
+        raise ValueError(f"preview direct limit must be positive, got {direct_limit}")
+    message_rows = list(
         conn.execute(
-            "SELECT id, data FROM message WHERE session_id=? "
-            "ORDER BY time_created DESC LIMIT ?",
-            (session_id, limit),
+            "SELECT id, data, time_created FROM message WHERE session_id=? "
+            "ORDER BY time_created DESC, id DESC",
+            (session_id,),
         )
     )
-    lines: list[str] = []
-    for row in reversed(rows):
-        try:
-            role = json.loads(row["data"]).get("role", "?")
-        except (TypeError, ValueError):
-            role = "?"
-        chunks: list[str] = []
-        for part in conn.execute(
-            "SELECT data FROM part WHERE message_id=? ORDER BY time_created LIMIT ?",
-            (row["id"], PREVIEW_MAX_PARTS),
-        ):
-            text = _text_of_part(part["data"])
-            if text:
-                chunks.append(text)
-        body = " ".join(chunks)
-        if len(body) > PREVIEW_TEXT_LIMIT:
-            body = body[:PREVIEW_TEXT_LIMIT] + "\u2026"
-        lines.append(f"{role}: {body}")
-    return lines
+    parts_by_message: dict[str, list[str]] = {}
+    for part_row in conn.execute(
+        "SELECT message_id, data FROM part WHERE session_id=? "
+        "ORDER BY message_id, time_created, id",
+        (session_id,),
+    ):
+        parts_by_message.setdefault(part_row["message_id"], []).append(part_row["data"])
+    selected: list[PreviewMessage] = []
+    direct_count = 0
+    for row in message_rows:
+        message = _build_preview_message(row, parts_by_message.get(row["id"], []))
+        selected.append(message)
+        if is_direct_message(message):
+            direct_count += 1
+            if direct_count >= direct_limit:
+                break
+    selected.reverse()
+    total = len(message_rows)
+    return Preview(
+        messages=tuple(selected),
+        total=total,
+        omitted=max(0, total - len(selected)),
+    )
 
 
-def _model_label(raw: str | None) -> str:
+def model_label(raw: str | None) -> str:
     """Render the session ``model`` JSON column as ``provider/model``."""
     if not raw:
         return "?"
@@ -294,16 +383,3 @@ def _model_label(raw: str | None) -> str:
     provider = data.get("providerID", "?")
     name = data.get("id", "?")
     return f"{provider}/{name}"
-
-
-def describe(conn: sqlite3.Connection, session: Session) -> str:
-    """Return a multi-line, human-readable summary used by the preview pane."""
-    header = [
-        f"title:     {session.title}",
-        f"id:        {session.session_id}",
-        f"directory: {session.directory}",
-        f"agent:     {session.agent or '?'}",
-        f"model:     {_model_label(session.model)}",
-        "",
-    ]
-    return "\n".join(header + _message_lines(conn, session.session_id, limit=8))

@@ -101,6 +101,13 @@ class PickTest(unittest.TestCase):
         self.assertIn("directory", header)
         self.assertIn("ctrl-d", header)  # shortcuts legend on the second line
 
+    def test_preview_window_pins_six_header_lines(self) -> None:
+        """The metadata card stays visible while preview content scrolls."""
+        _, captured = self._capture("")
+        window = next(arg for arg in captured["argv"] if arg.startswith("--preview-window="))
+        self.assertIn("~6", window)
+        self.assertIn("wrap", window)
+
     def test_pick_binds_actions_to_reload_in_place(self) -> None:
         """Fork reloads immediately; the confirm key reloads after firing."""
         _, captured = self._capture("")

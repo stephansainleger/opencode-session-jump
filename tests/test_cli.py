@@ -11,7 +11,7 @@ from unittest import mock
 
 import support
 from ocjump import __main__ as main_mod
-from ocjump import config
+from ocjump import config, render
 from ocjump.__main__ import main
 
 
@@ -67,11 +67,20 @@ class CliTest(unittest.TestCase):
         self.assertTrue(out.endswith("\0"))
 
     def test_preview_mode(self) -> None:
-        """--preview prints the session metadata and message text."""
+        """--preview prints the metadata card and a message rule."""
         code, out = self._run(["--preview", "ses_a"])
         self.assertEqual(code, 0)
         self.assertIn("hello", out)
         self.assertIn("Alpha", out)
+        self.assertIn("── user ·", render.strip_ansi(out))
+        self.assertIn("\x1b[", out)
+
+    def test_preview_respects_no_color(self) -> None:
+        """$NO_COLOR keeps the preview free of ANSI codes."""
+        with mock.patch.dict(os.environ, {"NO_COLOR": "1"}):
+            code, out = self._run(["--preview", "ses_a"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("\x1b[", out)
 
     def test_version_exits_zero(self) -> None:
         """--version prints and exits successfully."""

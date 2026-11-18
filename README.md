@@ -93,8 +93,11 @@ ocjump --status-colors never  # plain text segment (always | never)
 ```
 
 Inside the picker: type to fuzzy-filter, `Enter` (or **double-click**)
-accepts, `Esc` cancels. The preview pane shows the session metadata and its
-last messages.
+accepts, `Esc` cancels. The preview pane shows a fixed metadata card and a
+window ending at the newest message that contains at least the **last 4 direct
+messages** — user prompts or assistant text addressed to you — regardless of
+how many intermediate assistant steps sit between them. The header reports the
+direct count and how many older messages were omitted.
 
 By default the filter matches the **directory and title** only (not the state
 label or age), and `--sort attention` hoists the sessions that need you —
@@ -127,7 +130,18 @@ runtimes rather than one per session.
 
 ### Layout
 
-The preview pane (right) shows the session metadata and its last messages.
+The preview pane (right) opens with a six-line metadata card (title, id,
+directory, agent, model, then a summary) that stays pinned while the content
+scrolls. Each user turn and assistant block is preceded by a full-width rule
+carrying the role and its age, so transitions are unambiguous. Consecutive
+assistant messages are merged into one block: only their text addressed to the
+user is shown, and a run without text collapses to one muted line such as
+`⋯ 5 intermediate steps · bash×3, edit×2`; reasoning and tool details are
+hidden. The window always reaches back to the fourth most recent direct
+message, so intermediate steps can never crowd out the conversation. Long text
+is clipped at a word boundary with an ellipsis. Colors follow the active
+palette and honor `$NO_COLOR`.
+
 Columns are `state · age · directory · title`. Label, age and directory are
 padded to fixed widths so every title starts at the same column; the (short)
 directory precedes the (often long) title so it always stays visible. A

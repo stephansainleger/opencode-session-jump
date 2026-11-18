@@ -1,5 +1,6 @@
 """Unit tests for read-only store access and preview rendering."""
 
+import json
 import os
 import tempfile
 import unittest
@@ -184,21 +185,93 @@ class GetSessionTest(unittest.TestCase):
         self.assertTrue(db.get_session(self.conn, "ses_arch").archived)
 
 
-class DescribeTest(unittest.TestCase):
-    """The preview must include metadata and the latest message text."""
+class PreviewTest(unittest.TestCase):
+    """The preview tail keeps message order and part types."""
 
     def setUp(self) -> None:
-        """Create a store with one session and one user message."""
+        """Create a store with one session and three messages."""
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.conn = support.make_db(Path(self.tmp.name) / "opencode.db")
         support.add_session(self.conn, "ses_a", "Alpha", "/p")
-        support.add_message(self.conn, "m1", "ses_a", "user", "hello world", time_created=1)
+        support.add_message(self.conn, "m1", "ses_a", "user", "first", time_created=1000)
+        support.add_message(self.conn, "m2", "ses_a", "assistant", "second", time_created=2000)
+        support.add_message(self.conn, "m3", "ses_a", "user", "third", time_created=3000)
 
-    def test_describe_includes_metadata_and_message(self) -> None:
-        """The preview shows title, id, model and the latest message body."""
-        text = db.describe(self.conn, db.get_session(self.conn, "ses_a"))
-        self.assertIn("Alpha", text)
-        self.assertIn("ses_a", text)
-        self.assertIn("prov/m", text)
-        self.assertIn("hello world", text)
+    def _add_message(self, message_id: str, role: str, time_created: int) -> None:
+        """Insert a message without parts, for typed-part tests."""
+        self.conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (message_id, "ses_a", time_created, time_created, json.dumps({"role": role})),
+        )
+        self.conn.commit()
+
+    def _add_part(self, part_id: str, message_id: str, payload: dict) -> None:
+        """Insert one raw part payload attached to ``message_id``."""
+        self.conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (part_id, message_id, "ses_a", 0, 0, json.dumps(payload)),
+        )
+        self.conn.commit()
+
+    def test_tail_is_chronological_and_counts_omitted(self) -> None:
+        """Only the newest direct messages are kept, oldest first within the window."""
+        preview = db.load_preview(self.conn, "ses_a", direct_limit=2)
+        self.assertEqual([message.role for message in preview.messages], ["assistant", "user"])
+        self.assertEqual(preview.total, 3)
+        self.assertEqual(preview.omitted, 1)
+
+    def test_window_spans_intermediate_assistants(self) -> None:
+        """Four direct messages pull in every assistant between them."""
+        self._add_message("m4", "user", 4000)
+        self._add_message("m5", "assistant", 5000)
+        self._add_part("p5", "m5", {"type": "reasoning", "text": "plan"})
+        self._add_message("m6", "assistant", 6000)
+        self._add_part("p6", "m6", {"type": "text", "text": "answer one"})
+        self._add_message("m7", "user", 7000)
+        self._add_message("m8", "assistant", 8000)
+        self._add_part(
+            "p8", "m8", {"type": "tool", "tool": "bash", "state": {"status": "completed"}}
+        )
+        self._add_message("m9", "assistant", 9000)
+        self._add_part("p9", "m9", {"type": "text", "text": "answer two"})
+        self._add_message("m10", "user", 10000)
+        preview = db.load_preview(self.conn, "ses_a", direct_limit=4)
+        self.assertEqual(
+            [message.role for message in preview.messages],
+            ["assistant", "user", "assistant", "assistant", "user"],
+        )
+        self.assertEqual(len(preview.messages), 5)
+        self.assertEqual(preview.omitted, 5)
+        self.assertEqual(
+            sum(1 for message in preview.messages if db.is_direct_message(message)), 4
+        )
+
+    def test_parts_keep_their_kind_and_tool_status(self) -> None:
+        """Text, reasoning and tool parts are not flattened together."""
+        self._add_message("m4", "assistant", 4000)
+        self._add_part("p4a", "m4", {"type": "text", "text": "visible"})
+        self._add_part("p4b", "m4", {"type": "reasoning", "text": "plan"})
+        self._add_part(
+            "p4c", "m4", {"type": "tool", "tool": "bash", "state": {"status": "completed"}}
+        )
+        preview = db.load_preview(self.conn, "ses_a", direct_limit=1)
+        parts = preview.messages[0].parts
+        self.assertEqual([part.kind for part in parts], ["text", "reasoning", "tool"])
+        self.assertEqual(parts[0].text, "visible")
+        self.assertEqual(parts[1].text, "plan")
+        self.assertEqual((parts[2].tool, parts[2].status), ("bash", "completed"))
+
+    def test_empty_session(self) -> None:
+        """A session without messages yields an empty preview and zero total."""
+        support.add_session(self.conn, "ses_empty", "Empty", "/p")
+        preview = db.load_preview(self.conn, "ses_empty")
+        self.assertEqual(preview.messages, ())
+        self.assertEqual((preview.total, preview.omitted), (0, 0))
+
+    def test_negative_direct_limit_raises(self) -> None:
+        """A non-positive direct limit is rejected at the boundary."""
+        with self.assertRaises(ValueError):
+            db.load_preview(self.conn, "ses_a", direct_limit=0)

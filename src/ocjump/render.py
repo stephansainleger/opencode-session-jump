@@ -1,9 +1,10 @@
-"""Presentation of session rows: fzf input, human table and NDJSON.
+"""Presentation of session rows and the preview pane.
 
 The interactive picker feeds tab-separated rows to fzf, hiding the session and
 pane identifiers in the last two fields.  The same :class:`Record` renders the
 non-interactive ``--list`` table and the ``--json`` / ``-0`` machine formats,
-so the three views can never drift apart.
+so the three views can never drift apart.  :func:`preview_lines` renders the
+fixed metadata card and recent messages shown in fzf's preview window.
 """
 
 from __future__ import annotations
@@ -11,9 +12,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 
-from .db import Session
+from .db import Preview, PreviewMessage, Session, is_direct_message, model_label
 from .panes import Pane
 from .state import (
     DONE,
@@ -39,6 +41,12 @@ STATUS_STATES = (
     ERROR,
     UNKNOWN,
 )
+PREVIEW_TEXT_LIMIT = 400
+PREVIEW_DEFAULT_WIDTH = 80
+PREVIEW_MIN_WIDTH = 40
+PREVIEW_MAX_WIDTH = 200
+PREVIEW_LABEL_WIDTH = 5
+PREVIEW_INDENT = "  "
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -335,3 +343,233 @@ def status_line(
                 token = f"{colour}{state_style.glyph}#[default]{count}"
         parts.append(token)
     return " ".join(parts)
+
+
+def preview_width(width: int | None = None) -> int:
+    """Return the usable preview width, honoring ``$FZF_PREVIEW_COLUMNS``.
+
+    A preview command is not attached to a tty, so the width comes from fzf's
+    exported variable; tests can pass it explicitly.  The result is clamped so
+    a tiny or absurd value cannot produce broken rules.
+    """
+    if width is None:
+        raw = os.environ.get("FZF_PREVIEW_COLUMNS", "")
+        try:
+            width = int(raw)
+        except (TypeError, ValueError):
+            width = PREVIEW_DEFAULT_WIDTH
+    return max(PREVIEW_MIN_WIDTH, min(PREVIEW_MAX_WIDTH, width))
+
+
+def _clip_text(text: str, limit: int = PREVIEW_TEXT_LIMIT) -> str:
+    """Trim long text at a word boundary and mark the omission."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return f"{cut.rstrip()} {ELLIPSIS}"
+
+
+def _preview_role_color(role: str) -> str:
+    """Return the palette role for a message author."""
+    return {"user": "accent", "assistant": "secondary"}.get(role, "muted")
+
+
+def _box_top(session: Session, width: int, palette: Palette, color: bool) -> str:
+    """Return the top border of the metadata card, with the session title."""
+    title = _fit(display_title(session), max(1, width - 8))
+    dashes = max(1, width - len(title) - 5)
+    if color:
+        title = colorize(title, palette, "keys")
+    return f"╭─ {title} {'─' * dashes}╮"
+
+
+def _box_bottom(width: int) -> str:
+    """Return the closing border of the metadata card."""
+    return f"╰{'─' * max(1, width - 2)}╯"
+
+
+def _box_line(
+    label: str, value: str, width: int, palette: Palette, color: bool, keep_tail: bool = False
+) -> str:
+    """Return one padded metadata row inside the card."""
+    content_width = max(1, width - 4)
+    label_text = label.ljust(PREVIEW_LABEL_WIDTH)
+    value_text = _fit(value, max(1, content_width - len(label_text) - 1), keep_tail)
+    plain = f"{label_text} {value_text}".ljust(content_width)
+    if color:
+        plain = colorize(label_text, palette, "muted") + plain[len(label_text) :]
+    return f"│ {plain} │"
+
+
+def _preview_header(
+    session: Session, preview: Preview, palette: Palette, color: bool, width: int
+) -> list[str]:
+    """Return the six fixed lines kept visible at the top of the preview."""
+    direct = sum(1 for message in preview.messages if is_direct_message(message))
+    if preview.total == 0:
+        summary = "no messages"
+    elif direct == 0:
+        summary = "no direct messages"
+    else:
+        summary = f"last {direct} direct message" + ("" if direct == 1 else "s")
+    if preview.omitted:
+        summary += f" · {preview.omitted} older messages omitted"
+    summary = _fit(summary, width)
+    if color:
+        summary = colorize(summary, palette, "muted")
+    return [
+        _box_top(session, width, palette, color),
+        _box_line("id", session.session_id, width, palette, color),
+        _box_line("dir", abbreviate_dir(session.directory), width, palette, color, True),
+        _box_line(
+            "agent",
+            f"{session.agent or '?'} · {model_label(session.model)}",
+            width,
+            palette,
+            color,
+        ),
+        _box_bottom(width),
+        summary,
+    ]
+
+
+def _preview_rule(
+    role: str, age: str, width: int, palette: Palette, color: bool
+) -> str:
+    """Return a full-width rule announcing one message and its age."""
+    label = role or "?"
+    plain_prefix = f"── {label} · {age} "
+    if len(plain_prefix) >= width:
+        label = _fit(label, max(1, width - 8))
+        plain_prefix = f"── {label} · {age} "
+    fill = max(3, width - len(plain_prefix))
+    if color:
+        label = colorize(label, palette, _preview_role_color(role))
+    return f"── {label} · {age} {'─' * fill}"
+
+
+def _group_preview_messages(
+    messages: tuple[PreviewMessage, ...],
+) -> list[list[PreviewMessage]]:
+    """Merge consecutive assistant messages into one display block.
+
+    OpenCode emits one assistant message per step (reasoning/tool), often many
+    in a row before the final text.  Treating them as one block removes the
+    per-step rules that used to dominate the preview while keeping user turns
+    separate.
+    """
+    blocks: list[list[PreviewMessage]] = []
+    for message in messages:
+        if (
+            blocks
+            and message.role == "assistant"
+            and blocks[-1][0].role == "assistant"
+        ):
+            blocks[-1].append(message)
+        else:
+            blocks.append([message])
+    return blocks
+
+
+def _text_lines(message: PreviewMessage) -> list[str]:
+    """Render the user-facing text parts of one message as indented lines."""
+    lines: list[str] = []
+    for part in message.parts:
+        if part.kind != "text":
+            continue
+        text = _clip_text(part.text)
+        lines.extend(
+            f"{PREVIEW_INDENT}{line}" if line else "" for line in text.splitlines()
+        )
+    return lines
+
+
+def _tool_summary(messages: list[PreviewMessage]) -> str:
+    """Return a compact ``bash×3, edit×1`` count of the block's tool calls."""
+    counts: dict[str, int] = {}
+    for message in messages:
+        for part in message.parts:
+            if part.kind == "tool":
+                counts[part.tool] = counts.get(part.tool, 0) + 1
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return ", ".join(f"{tool}×{count}" for tool, count in ordered)
+
+
+def _assistant_summary(
+    block: list[PreviewMessage], width: int, palette: Palette, color: bool
+) -> str:
+    """Return the single muted line standing in for a text-less assistant run."""
+    steps = len(block)
+    label = f"⋯ {steps} intermediate step" + ("" if steps == 1 else "s")
+    tools = _tool_summary(block)
+    if tools:
+        label += f" · {tools}"
+    label = _fit(label, max(1, width - len(PREVIEW_INDENT)))
+    if color:
+        label = colorize(label, palette, "muted")
+    return f"{PREVIEW_INDENT}{label}"
+
+
+def _block_lines(
+    block: list[PreviewMessage],
+    width: int,
+    palette: Palette,
+    color: bool,
+    now_ms: int,
+) -> list[str]:
+    """Render one user turn or one merged assistant block."""
+    role = block[0].role
+    text_lines: list[str] = []
+    for message in block:
+        text_lines.extend(_text_lines(message))
+    rule = _preview_rule(
+        role,
+        format_age(now_ms, block[-1].time_created),
+        width,
+        palette,
+        color,
+    )
+    if role == "assistant":
+        if text_lines:
+            return ["", rule] + text_lines
+        has_steps = any(
+            part.kind in {"reasoning", "tool"}
+            for message in block
+            for part in message.parts
+        )
+        if has_steps:
+            return ["", rule, _assistant_summary(block, width, palette, color)]
+        return []
+    if text_lines:
+        return ["", rule] + text_lines
+    return []
+
+
+def preview_lines(
+    session: Session,
+    preview: Preview,
+    palette: Palette,
+    color: bool = True,
+    width: int | None = None,
+    now_ms: int | None = None,
+) -> str:
+    """Render the session preview: fixed metadata card plus recent exchanges.
+
+    The message window already reaches back to the configured number of direct
+    messages.  Consecutive assistant messages are merged into one block; direct
+    text is shown indented, and a block without text becomes one muted summary
+    line naming its step count and tool calls, so intermediate work never
+    crowds the conversation.  ``now_ms`` makes relative ages deterministic in
+    tests.
+    """
+    width = preview_width(width)
+    now = int(time.time() * 1000) if now_ms is None else now_ms
+    lines = _preview_header(session, preview, palette, color, width)
+    body: list[str] = []
+    for block in _group_preview_messages(preview.messages):
+        body.extend(_block_lines(block, width, palette, color, now))
+    if not body and preview.total:
+        body.extend(["", f"{PREVIEW_INDENT}(no text content)"])
+    return "\n".join(lines + body)

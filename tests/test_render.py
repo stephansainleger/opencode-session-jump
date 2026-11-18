@@ -306,3 +306,152 @@ class StatusLineTest(unittest.TestCase):
             [_state_record("working", 1)], theme.load("opencode"), color=False
         )
         self.assertEqual(line, "OC:1 ●1")
+
+
+class PreviewLinesTest(unittest.TestCase):
+    """The preview card separates metadata, roles and message transitions."""
+
+    NOW = 10_000
+    SESSION = db.Session(
+        session_id="ses_a",
+        title="Hello",
+        directory="/home/u/dev",
+        time_updated=1_000,
+        agent="plan",
+        model='{"id": "m", "providerID": "prov"}',
+    )
+
+    def _part(self, kind: str, text: str = "", tool: str = "", status: str = "") -> db.PreviewPart:
+        """Build one preview part."""
+        return db.PreviewPart(kind, text, tool, status)
+
+    def _message(self, role: str, created: int, parts: list[db.PreviewPart]) -> db.PreviewMessage:
+        """Build one preview message."""
+        return db.PreviewMessage(role, created, tuple(parts))
+
+    def _preview(self, total: int = 2) -> db.Preview:
+        """Build a two-message preview with text, thinking and a tool call."""
+        messages = (
+            self._message("user", 5_000, [self._part("text", "question")]),
+            self._message(
+                "assistant",
+                8_000,
+                [
+                    self._part("reasoning", "thinking hard"),
+                    self._part("tool", tool="bash", status="completed"),
+                    self._part("text", "answer"),
+                ],
+            ),
+        )
+        return db.Preview(messages=messages, total=total, omitted=total - len(messages))
+
+    def _render(self, preview: db.Preview | None = None, **kwargs) -> str:
+        """Render the standard preview with deterministic defaults."""
+        return render.preview_lines(
+            self.SESSION,
+            preview or self._preview(),
+            PALETTE,
+            now_ms=self.NOW,
+            **kwargs,
+        )
+
+    def test_header_is_six_fixed_lines(self) -> None:
+        """The card and summary occupy exactly the six pinned header lines."""
+        lines = self._render(color=False).splitlines()
+        header = lines[:6]
+        self.assertEqual(len(header), 6)
+        self.assertIn("Hello", header[0])
+        self.assertIn("ses_a", header[1])
+        self.assertIn("/home/u/dev", header[2])
+        self.assertIn("plan", header[3])
+        self.assertEqual(header[5], "last 2 direct messages")
+
+    def test_header_reports_omitted_messages(self) -> None:
+        """A larger total explains that older messages are not shown."""
+        lines = self._render(self._preview(total=9), color=False).splitlines()
+        self.assertEqual(
+            lines[5], "last 2 direct messages · 7 older messages omitted"
+        )
+
+    def test_messages_have_rules_and_role_badges(self) -> None:
+        """Each visible message starts with a full-width role rule."""
+        out = self._render(color=False)
+        self.assertIn("── user · 5s ", out)
+        self.assertIn("── assistant · 2s ", out)
+        # A blank line precedes every rule, so two messages never touch.
+        self.assertIn("\n\n── assistant", out)
+
+    def test_intermediate_assistants_are_merged_and_summarized(self) -> None:
+        """A run of text-less assistant steps becomes one summary line."""
+        preview = db.Preview(
+            messages=(
+                self._message("assistant", 5_000, [self._part("reasoning", "plan")]),
+                self._message(
+                    "assistant", 6_000, [self._part("tool", tool="bash", status="completed")]
+                ),
+                self._message(
+                    "assistant", 7_000, [self._part("tool", tool="edit", status="completed")]
+                ),
+            ),
+            total=3,
+            omitted=0,
+        )
+        out = self._render(preview, color=False)
+        self.assertEqual(out.count("── assistant"), 1)
+        self.assertIn("⋯ 3 intermediate steps", out)
+        self.assertIn("bash×1, edit×1", out)
+        self.assertNotIn("thinking", out)
+        self.assertNotIn("bash completed", out)
+
+    def test_direct_answer_hides_its_steps(self) -> None:
+        """Only the text of a direct assistant reply is shown."""
+        out = self._render(color=False)
+        self.assertIn("answer", out)
+        self.assertNotIn("thinking", out)
+        self.assertNotIn("bash completed", out)
+
+    def test_color_wraps_roles_and_labels(self) -> None:
+        """Color mode emits ANSI codes; plain mode emits none."""
+        colored = self._render(color=True)
+        plain = self._render(color=False)
+        self.assertIn("\x1b[", colored)
+        self.assertNotIn("\x1b[", plain)
+
+    def test_rules_fit_the_requested_width(self) -> None:
+        """Header and rules never exceed the preview width."""
+        lines = self._render(color=False, width=40).splitlines()
+        for line in lines[:6]:
+            self.assertLessEqual(len(line), 40)
+        for line in lines:
+            if line.startswith("── "):
+                self.assertEqual(len(line), 40)
+
+    def test_long_text_is_clipped_with_a_marker(self) -> None:
+        """A long message is cut at a word boundary and marked."""
+        long_text = "word " * 200
+        preview = db.Preview(
+            messages=(
+                self._message("user", 5_000, [self._part("text", long_text)]),
+            ),
+            total=1,
+            omitted=0,
+        )
+        out = self._render(preview, color=False)
+        self.assertIn(render.ELLIPSIS, out)
+        self.assertNotIn(long_text.strip(), out)
+
+    def test_empty_preview(self) -> None:
+        """A session with no messages says so in the header."""
+        empty = db.Preview(messages=(), total=0, omitted=0)
+        self.assertIn("no messages", self._render(empty, color=False))
+
+    def test_messages_without_parts_are_skipped(self) -> None:
+        """Empty messages do not produce a bare rule."""
+        preview = db.Preview(
+            messages=(self._message("assistant", 5_000, []),),
+            total=1,
+            omitted=0,
+        )
+        out = self._render(preview, color=False)
+        self.assertNotIn("── assistant", out)
+        self.assertIn("(no text content)", out)
